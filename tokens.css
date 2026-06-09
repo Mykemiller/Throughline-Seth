@@ -1,0 +1,27 @@
+/*
+ * Throughline — Brand Tokens
+ *
+ * Canonical CSS custom properties for the Throughline brand surface.
+ * Values trace to the Brand Bible v2 (Notion 33289a0c1680815c996cedb8fde4429f),
+ * which remains the single source of truth. Keep this file in sync with the
+ * Brand Bible — do not invent new brand values here.
+ *
+ * Scope: the four foundations named in CLAUDE.md (two core colors, two
+ * typefaces). Extend deliberately as the design system is specified.
+ */
+
+:root {
+  /* ---- Color: core palette ---- */
+  --color-parchment: #F2E6BC;   /* warm paper / primary light surface */
+  --color-deep-river: #1E2A3A;  /* deep navy / primary dark surface + ink */
+
+  /* ---- Color: semantic aliases ---- */
+  --color-surface: var(--color-parchment);
+  --color-ink: var(--color-deep-river);
+  --color-background: var(--color-parchment);
+  --color-foreground: var(--color-deep-river);
+
+  /* ---- Typography: families ---- */
+  --font-display: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+  --font-ui: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
