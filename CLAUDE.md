@@ -42,6 +42,7 @@ Key Notion pages: Project Hub `32f89a0c168081059b13ec225170e441` · First Thread
 - **Data:** Supabase Postgres + pgvector (metadata, single source of truth), Supabase Storage (photos), Cloudflare R2 (video).
 - **Voice:** Hume EVI 3 (live two-way, ZDR) with Claude as BYO-LLM. ElevenLabs is for Walt/produced clips only — not the live Companion.
 - **Brand tokens:** `tokens.css` at repo root. Parchment `#F2E6BC`, Deep River `#1E2A3A`; Cormorant Garamond (display), DM Sans (UI). Honor the Brand Bible.
+- **Env / secrets:** real values in `.env` (gitignored); template in `.env.example`. Web env layer is split by trust boundary: `apps/web/src/env.ts` is client-safe (`VITE_*` only — Supabase URL + anon key), `apps/web/server/env.ts` holds all secrets (server only, browser-guarded; consumed by the Companion/voice runtime). Vite inlines `VITE_*` into the browser bundle, so **never** give a server secret a `VITE_` prefix. Missing var → fail fast, don't default.
 
 -----
 
