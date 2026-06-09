@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:server": "tsc --noEmit -p server/tsconfig.json",
     "server": "set -a && . ../../.env && set +a && node --experimental-strip-types server/index.ts"
   },
   "dependencies": {

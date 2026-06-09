@@ -6,4 +6,8 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   envDir: "../../",
+  server: {
+    // Allow importing the canonical brand tokens from the repo root (tokens.css).
+    fs: { allow: ["../../"] },
+  },
 });

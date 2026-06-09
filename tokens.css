@@ -1,0 +1,49 @@
+/**
+ * Throughline brand tokens — Brand Bible v2 (Notion 33289a0c1680815c996cedb8fde4429f).
+ * Single source of truth for color and type. Honor these; do not hardcode brand
+ * values elsewhere. Referenced by apps/web (and future surfaces).
+ */
+:root {
+  /* Core palette */
+  --color-parchment: #f2e6bc;
+  --color-deep-river: #1e2a3a;
+
+  /* Derived neutrals (tints/shades of the core palette) */
+  --color-parchment-dim: #e7d8a6;
+  --color-deep-river-soft: #2c3c52;
+  --color-deep-river-muted: rgba(30, 42, 58, 0.66);
+  --color-hairline: rgba(30, 42, 58, 0.16);
+
+  /* Semantic surfaces */
+  --surface-base: var(--color-parchment);
+  --surface-ink: var(--color-deep-river);
+  --surface-ink-soft: var(--color-deep-river-muted);
+
+  /* Typography */
+  --font-display: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+  --font-ui: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Type scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.5rem;
+  --text-display: clamp(2.75rem, 6vw, 4.5rem);
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* Radius & elevation */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+}

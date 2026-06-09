@@ -7,7 +7,7 @@
  * See CLAUDE.md rule #6 (Secrets via env only).
  */
 
-if (typeof window !== "undefined") {
+if (typeof (globalThis as { window?: unknown }).window !== "undefined") {
   throw new Error("server/env.ts must never be imported from client code.");
 }
 
