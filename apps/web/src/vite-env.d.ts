@@ -5,6 +5,8 @@
 interface ImportMetaEnv {
   readonly VITE_SUPABASE_URL: string;
   readonly VITE_SUPABASE_ANON_KEY: string;
+  // Feature flags — opt-in, "true" to enable. Off by default (CLAUDE.md).
+  readonly VITE_FEATURE_FIRST_THREAD_VOICE?: string;
 }
 
 interface ImportMeta {
