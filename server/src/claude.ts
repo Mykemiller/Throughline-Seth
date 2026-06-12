@@ -32,7 +32,10 @@ const RECORD_PAYLOAD_TOOL: Anthropic.Tool = {
     type: 'object',
     additionalProperties: false,
     properties: {
-      kind: { type: 'string', enum: ['moment_draft', 'story_draft', 'closed_topic_event'] },
+      kind: {
+        type: 'string',
+        enum: ['moment_draft', 'story_draft', 'closed_topic_event', 'chapter_complete'],
+      },
       title: { type: 'string', description: 'Short title (moment_draft / story_draft).' },
       summary: { type: 'string', description: 'Grounded summary (moment_draft).' },
       body: { type: 'string', description: 'Longer narrative (story_draft).' },
@@ -43,6 +46,15 @@ const RECORD_PAYLOAD_TOOL: Anthropic.Tool = {
         description: "Career Arc clustering hint, e.g. ['career_map'].",
       },
       phrase: { type: 'string', description: 'Closed-door phrase (closed_topic_event).' },
+      sceneType: {
+        type: 'string',
+        enum: ['first_memory', 'high_point', 'low_point', 'turning_point', 'life_script_event'],
+        description: 'McAdams scene-type tag for a moment_draft, when clear.',
+      },
+      carryDetail: {
+        type: 'string',
+        description: 'chapter_complete: one concrete detail to carry into the next chapter.',
+      },
     },
     required: ['kind'],
   },
@@ -109,13 +121,25 @@ function coercePayload(input: unknown, chapterId: ChapterId): FirstThreadPayload
   const o = input as Record<string, unknown>;
   const kind = o.kind;
   if (kind === 'moment_draft' && typeof o.title === 'string' && typeof o.summary === 'string') {
+    const scenes = ['first_memory', 'high_point', 'low_point', 'turning_point', 'life_script_event'];
     return {
       kind,
       title: o.title,
       summary: o.summary,
       whenText: typeof o.whenText === 'string' ? o.whenText : undefined,
+      sceneType:
+        typeof o.sceneType === 'string' && scenes.includes(o.sceneType)
+          ? (o.sceneType as import('@throughline/shared').MomentDraftPayload['sceneType'])
+          : undefined,
       clusterTags: Array.isArray(o.clusterTags) ? (o.clusterTags as string[]) : undefined,
       chapterId,
+    };
+  }
+  if (kind === 'chapter_complete') {
+    return {
+      kind,
+      chapterId,
+      carryDetail: typeof o.carryDetail === 'string' ? o.carryDetail : undefined,
     };
   }
   if (kind === 'story_draft' && typeof o.title === 'string' && typeof o.body === 'string') {

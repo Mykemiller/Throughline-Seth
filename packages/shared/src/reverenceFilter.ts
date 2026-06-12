@@ -80,6 +80,17 @@ export const CLOSED_DOOR_PHRASES: readonly string[] = [
   "none of your business",
   "not your business",
   "i don't wish to discuss",
+  "we don't talk about",
+  "we do not talk about",
+  "i'm not ready to talk about",
+  "i am not ready to talk about",
+  "not ready to discuss",
+  "please don't ask about",
+  "don't ask me about",
+  "do not ask me about",
+  "i'd rather we didn't",
+  "leave that chapter closed",
+  "leave that alone",
 ];
 
 /**
@@ -130,3 +141,49 @@ export function detectClosedDoor(utterance: string): ReverenceMatch | null {
  */
 export const REVERENCE_ACKNOWLEDGMENT =
   "Of course — we'll leave that there. Thank you for telling me. Let's go somewhere else whenever you're ready.";
+
+/* ── Closed-topic tokenization (B5 — theme matches on normalized tokens) ──── */
+
+/** Stop words excluded from match tokens — function words carry no topic. */
+const STOP_WORDS = new Set([
+  'a','an','the','and','or','but','of','in','on','at','to','for','with','about',
+  'is','was','were','are','be','been','it','its','this','that','these','those',
+  'i','me','my','you','your','we','our','he','him','his','she','her','they',
+  'them','their','do','does','did','not','no','dont','didnt','doesnt','wont',
+  'want','talk','talking','discuss','say','ask','asking','get','go','going',
+  'into','rather','please','stop','skip','really','just','very','so','too',
+  'can','cant','could','would','should','will','have','has','had','im','id',
+  'lets','us','more','any','anything','again','now','then','when','how','what',
+  'who','where','why','question','answer','that\u2019s','thats',
+]);
+
+/**
+ * Normalize a topic/utterance into match tokens (mirrors
+ * subscriber_closed_topics.match_tokens). Lowercased, punctuation-stripped,
+ * stop-worded, with a light singular/plural fold so "the divorce" and
+ * "divorces" both yield "divorce". Deterministic — never fuzzy, never a model.
+ */
+export function tokensForTopic(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of normalizeForReverence(text).replace(/'/g, '').split(' ')) {
+    if (!raw || raw.length < 3 || STOP_WORDS.has(raw)) continue;
+    const folded = raw.length > 4 && raw.endsWith('s') && !raw.endsWith('ss') ? raw.slice(0, -1) : raw;
+    if (!out.includes(folded)) out.push(folded);
+  }
+  return out;
+}
+
+/**
+ * Extract the closed TOPIC from an utterance that contained a closed-door
+ * phrase: the tokens of what follows the phrase (e.g. "stop asking about my
+ * father" → ["father"]). Falls back to the whole utterance's tokens minus the
+ * phrase's own words, so a bare "I'd rather not" yields [] (a turn-level
+ * refusal with no named scope).
+ */
+export function topicFromUtterance(utterance: string, matchedPhrase: string): string[] {
+  const norm = normalizeForReverence(utterance).replace(/'/g, '');
+  const phrase = normalizeForReverence(matchedPhrase).replace(/'/g, '');
+  const idx = norm.indexOf(phrase);
+  const tail = idx >= 0 ? norm.slice(idx + phrase.length) : norm;
+  return tokensForTopic(tail);
+}

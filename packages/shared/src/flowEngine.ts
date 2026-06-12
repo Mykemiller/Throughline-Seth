@@ -1,40 +1,161 @@
 /**
- * flowEngine.ts — minimal seven-chapter state transitions.
+ * flowEngine.ts — the seven-chapter state machine (THOUG-131 / E13-T3).
  *
- * OWNERSHIP: THOUG-131 (E13-T3). This is a thin, deterministic placeholder that
- * advances chapter→chapter, enforces the one-follow-up rule, and records
- * Reverence closures into the snapshot. THOUG-131 will flesh out transition
- * carries and milestone-extraction hooks. The voice runtime (THOUG-129) drives
- * it but does not own the chapter logic.
+ * Pure, deterministic functions over SessionStateSnapshot — no I/O. The voice
+ * runtime (THOUG-129) drives it but does not own chapter logic. The runtime
+ * persists the returned snapshot to rot_capture_sessions.state_snapshot every
+ * turn (E13-08 recovery).
  *
- * Pure functions over SessionStateSnapshot — no I/O. The runtime persists the
- * returned snapshot to rot_capture_sessions.state_snapshot.
+ * Behavior owned here (the scaffold owns the words):
+ *  - canonical chapter order + legal advances (never backward, never skipping)
+ *  - the one-bounded-follow-up rule per chapter
+ *  - transition carries
+ *  - closed-topic recording + the pre-prompt gate (token match, never fuzzy)
+ *  - chapter completeness (≥1 confirmed Moment; never forced)
+ *  - dynamic pacing lookup (silence tolerance scaled by chapter)
+ *  - turn counting for the deterministic sync_idempotency_key
  */
 
-import type { ChapterId, ClosedScope, SessionStateSnapshot } from './types.js';
-import { CHAPTER_ORDER } from './sethScaffold.js';
+import type {
+  ChapterCompletePayload,
+  ChapterId,
+  ClosedScope,
+  MomentDraftPayload,
+  PendingPhoto,
+  SessionStateSnapshot,
+  StoryDraftPayload,
+} from './types.js';
+import { CHAPTER_ORDER, getChapter, initialStateSnapshot } from './sethScaffold.js';
+import { tokensForTopic } from './reverenceFilter.js';
 
-/** Advance to the next chapter, resetting the per-chapter follow-up budget. */
-export function advanceChapter(snapshot: SessionStateSnapshot): SessionStateSnapshot {
-  const idx = CHAPTER_ORDER.indexOf(snapshot.chapterId);
-  const next = CHAPTER_ORDER[Math.min(idx + 1, CHAPTER_ORDER.length - 1)]!;
-  return { ...snapshot, chapterId: next, followUpSpent: false };
+/* ── Snapshot hygiene ─────────────────────────────────────────────────────── */
+
+/**
+ * Upgrade any persisted snapshot (including legacy v1 shapes) to the current
+ * v2 shape without losing closures. Resume must never drop a closed scope.
+ */
+export function reviveSnapshot(raw: unknown): SessionStateSnapshot {
+  const fresh = initialStateSnapshot();
+  if (!raw || typeof raw !== 'object') return fresh;
+  const o = raw as Record<string, unknown>;
+  const chapterId = CHAPTER_ORDER.includes(o.chapterId as ChapterId)
+    ? (o.chapterId as ChapterId)
+    : fresh.chapterId;
+  const closedScopes: ClosedScope[] = Array.isArray(o.closedScopes)
+    ? (o.closedScopes as Array<Record<string, unknown>>).map((s) => ({
+        phrase: String(s.phrase ?? ''),
+        matchTokens: Array.isArray(s.matchTokens)
+          ? (s.matchTokens as string[])
+          : tokensForTopic(String(s.phrase ?? '')),
+        closedAt: String(s.closedAt ?? new Date().toISOString()),
+        chapterId: CHAPTER_ORDER.includes(s.chapterId as ChapterId)
+          ? (s.chapterId as ChapterId)
+          : chapterId,
+      }))
+    : [];
+  return {
+    ...fresh,
+    chapterId,
+    followUpSpent: Boolean(o.followUpSpent),
+    turn: typeof o.turn === 'number' ? o.turn : 0,
+    closedScopes,
+    carry: o.carry && typeof o.carry === 'object' ? (o.carry as Record<string, string>) : {},
+    pendingDraft: (o.pendingDraft as SessionStateSnapshot['pendingDraft']) ?? null,
+    pendingPhoto: (o.pendingPhoto as SessionStateSnapshot['pendingPhoto']) ?? null,
+    activeMomentId: typeof o.activeMomentId === 'string' ? o.activeMomentId : null,
+    confirmedMoments:
+      o.confirmedMoments && typeof o.confirmedMoments === 'object'
+        ? (o.confirmedMoments as SessionStateSnapshot['confirmedMoments'])
+        : {},
+  };
 }
 
-/** Mark the current chapter's single follow-up as spent. */
-export function spendFollowUp(snapshot: SessionStateSnapshot): SessionStateSnapshot {
-  return { ...snapshot, followUpSpent: true };
+/* ── Turns & pacing ───────────────────────────────────────────────────────── */
+
+/** Count a subscriber turn (monotonic; feeds the idempotency key). */
+export function nextTurn(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  return { ...snapshot, turn: snapshot.turn + 1 };
 }
 
-/** True if we're already at the final chapter. */
+/** Dynamic pacing: silence tolerance for the current chapter (v0.2 hardening). */
+export function silenceToleranceMs(snapshot: SessionStateSnapshot): number {
+  return getChapter(snapshot.chapterId).silenceToleranceMs;
+}
+
+/* ── Chapter advancement ──────────────────────────────────────────────────── */
+
+/** True if we're already at the final chapter (Last Night). */
 export function isFinalChapter(snapshot: SessionStateSnapshot): boolean {
   return snapshot.chapterId === CHAPTER_ORDER[CHAPTER_ORDER.length - 1];
 }
 
+/** Confirmed-Moment count for the current chapter. */
+export function confirmedInChapter(snapshot: SessionStateSnapshot): number {
+  return snapshot.confirmedMoments[snapshot.chapterId] ?? 0;
+}
+
 /**
- * Record a closed-door scope into the snapshot (idempotent on phrase). The
- * Reverence Principle means once closed, always closed — so we never remove
- * from this list.
+ * The chapter completeness rule: a chapter is complete when the subscriber has
+ * given at least one confirmed River Moment. A chapter is never forced to
+ * completion — the engine refuses an advance without it.
+ */
+export function canAdvance(snapshot: SessionStateSnapshot): boolean {
+  return !isFinalChapter(snapshot) && confirmedInChapter(snapshot) > 0;
+}
+
+/**
+ * Advance one chapter forward (never backward, never skipping), resetting the
+ * per-chapter follow-up budget. Refuses an illegal advance by returning the
+ * snapshot unchanged.
+ */
+export function advanceChapter(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  if (!canAdvance(snapshot)) return snapshot;
+  const idx = CHAPTER_ORDER.indexOf(snapshot.chapterId);
+  const next = CHAPTER_ORDER[idx + 1]!;
+  return { ...snapshot, chapterId: next, followUpSpent: false };
+}
+
+/**
+ * Apply a chapter_complete signal from the model. The ENGINE decides legality:
+ * the payload must name the current chapter and the chapter must be complete.
+ * The carry detail is stashed for the transition.
+ */
+export function applyChapterComplete(
+  snapshot: SessionStateSnapshot,
+  payload: ChapterCompletePayload,
+): SessionStateSnapshot {
+  if (payload.chapterId !== snapshot.chapterId) return snapshot;
+  let next = snapshot;
+  if (payload.carryDetail) {
+    next = carry(next, `from_${snapshot.chapterId}`, payload.carryDetail);
+  }
+  return advanceChapter(next);
+}
+
+/** Mark the current chapter's single bounded follow-up as spent. */
+export function spendFollowUp(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  return { ...snapshot, followUpSpent: true };
+}
+
+/** Stash a value to carry into later chapters (e.g. a remembered name). */
+export function carry(
+  snapshot: SessionStateSnapshot,
+  key: string,
+  value: string,
+): SessionStateSnapshot {
+  return { ...snapshot, carry: { ...snapshot.carry, [key]: value } };
+}
+
+export function currentChapter(snapshot: SessionStateSnapshot): ChapterId {
+  return snapshot.chapterId;
+}
+
+/* ── Reverence: closures + the pre-prompt gate ────────────────────────────── */
+
+/**
+ * Record a closed-door scope (idempotent on phrase). Once closed, always
+ * closed — scopes are never removed by the engine; reversal is
+ * subscriber-settings-only, outside this runtime.
  */
 export function closeScope(
   snapshot: SessionStateSnapshot,
@@ -43,15 +164,90 @@ export function closeScope(
 ): SessionStateSnapshot {
   const already = snapshot.closedScopes.some((s) => s.phrase === phrase);
   if (already) return snapshot;
-  const scope: ClosedScope = { phrase, closedAt, chapterId: snapshot.chapterId };
+  const scope: ClosedScope = {
+    phrase,
+    matchTokens: tokensForTopic(phrase),
+    closedAt,
+    chapterId: snapshot.chapterId,
+  };
   return { ...snapshot, closedScopes: [...snapshot.closedScopes, scope] };
 }
 
-/** Stash a value to carry into later chapters (e.g. a remembered name). */
-export function carry(snapshot: SessionStateSnapshot, key: string, value: string): SessionStateSnapshot {
-  return { ...snapshot, carry: { ...snapshot.carry, [key]: value } };
+/**
+ * The pre-prompt gate (defense-in-depth #3): does this text touch any closed
+ * scope? Exact-match against normalized match_tokens — never fuzzy, never a
+ * model. Run before any prompt is emitted and before any draft is staged.
+ */
+export function touchesClosedScope(
+  snapshot: SessionStateSnapshot,
+  text: string,
+): ClosedScope | null {
+  if (!text) return null;
+  const tokens = new Set(tokensForTopic(text));
+  for (const scope of snapshot.closedScopes) {
+    for (const t of scope.matchTokens) {
+      if (tokens.has(t)) return scope;
+    }
+  }
+  return null;
 }
 
-export function currentChapter(snapshot: SessionStateSnapshot): ChapterId {
-  return snapshot.chapterId;
+/* ── Drafts, confirmation, photos ─────────────────────────────────────────── */
+
+/** Stage a draft on the structured channel, awaiting spoken confirmation. */
+export function stageDraft(
+  snapshot: SessionStateSnapshot,
+  payload: MomentDraftPayload | StoryDraftPayload,
+): SessionStateSnapshot {
+  return { ...snapshot, pendingDraft: { payload, stagedAtTurn: snapshot.turn } };
+}
+
+/** Clear the pending draft (declined, or committed by the runtime). */
+export function clearDraft(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  return { ...snapshot, pendingDraft: null };
+}
+
+/** Record a confirmed Moment write-back (the runtime did the DB write). */
+export function recordConfirmedMoment(
+  snapshot: SessionStateSnapshot,
+  momentId: string,
+): SessionStateSnapshot {
+  const count = (snapshot.confirmedMoments[snapshot.chapterId] ?? 0) + 1;
+  return {
+    ...snapshot,
+    pendingDraft: null,
+    activeMomentId: momentId,
+    confirmedMoments: { ...snapshot.confirmedMoments, [snapshot.chapterId]: count },
+  };
+}
+
+/** Pin a photo to the active Moment; Seth will elicit commentary next turn. */
+export function pinPhoto(
+  snapshot: SessionStateSnapshot,
+  photo: PendingPhoto,
+): SessionStateSnapshot {
+  return { ...snapshot, pendingPhoto: photo };
+}
+
+/** Clear the pending photo (commentary captured, or abandoned). */
+export function clearPhoto(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  return { ...snapshot, pendingPhoto: null };
+}
+
+/* ── Spoken confirmation detection (E13-04) ───────────────────────────────── */
+
+const AFFIRM = /\b(yes|yeah|yep|yes it does|that's right|thats right|that's it|sounds right|feels right|exactly|correct|perfect|it does|put it on|place it|save it|keep it)\b/i;
+const DECLINE = /\b(no|nope|not quite|that's not right|thats not right|don't save|do not save|leave it off|take it off|don't keep|skip it|not that)\b/i;
+
+/**
+ * Deterministic read of the subscriber's spoken confirmation of a pending
+ * draft. Decline wins on ambiguity — we never commit on a maybe.
+ */
+export function detectConfirmation(utterance: string): 'confirm' | 'decline' | 'unclear' {
+  if (!utterance) return 'unclear';
+  const declined = DECLINE.test(utterance);
+  const affirmed = AFFIRM.test(utterance);
+  if (declined) return 'decline';
+  if (affirmed) return 'confirm';
+  return 'unclear';
 }

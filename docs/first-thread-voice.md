@@ -71,3 +71,59 @@ Key files:
   columns exactly.
 - **Secrets via env only;** **owner-voice only** (`OWNER_SUBSCRIBER_ID`);
   **flag off by default.**
+
+## Session prototype additions (2026-06-12 — E13 build session)
+
+**Seven-chapter flow is real (THOUG-131).** `sethScaffold.ts` graduated from
+`0.2.0-stub` to `0.2.0`: the locked spine (First Light → The School Years →
+Becoming → The World You Built → What Stayed → Still Becoming → Last Night),
+canonical opening wordings from the Design Spec v0.3, The Fork branch inside
+Becoming, the three-act Career Arc (`cluster_tags ['career_map']`), nuclear
+episode focus per chapter, and per-chapter dynamic pacing
+(`silenceToleranceMs`). `flowEngine.ts` enforces order, the one-bounded-
+follow-up rule, transition carries, the chapter completeness rule (≥1
+confirmed Moment, never forced), and the tokenized closed-topic pre-prompt
+gate. The snapshot is `v:2`; `reviveSnapshot()` upgrades any legacy shape on
+resume without losing closures (E13-08).
+
+**Moments are written for real — only via confirmation (E13-03/04).**
+`riverWrites.ts` is un-stubbed. The only path to `rot_moments` is: Claude
+stages a `moment_draft`/`story_draft` on the tool channel → Seth reflects it
+back aloud → the subscriber's spoken **yes** (deterministic `detectConfirmation`;
+decline wins on ambiguity) → insert with `companion='seth'`,
+`source='first_thread_voice'`, `medium='voice'`, explicit
+`visibility='private'`, `chapter`, `layer` (2 Moment / 3 Story) and the
+deterministic `sync_idempotency_key = sha256(subscriber|session|chapter|turn)`
+(looked up before insert, so retries merge). Reverence closures also persist to
+`subscriber_closed_topics` with normalized `match_tokens`.
+
+**Photos (E13-05/06, THOUG-132).** "Add a photograph" mid-session: the browser
+parses EXIF date/GPS into proposed text, strips ALL metadata via canvas
+re-encode (`exif.ts`, no third-party parser), and uploads only the clean
+derivative — the untouched original only on the explicit "keep my original"
+opt-in (`media_assets.retain_original`). The server pins the asset to the
+active Moment and marks `pendingPhoto` in the snapshot, so Seth invites spoken
+commentary on his next turn; the confirmed commentary commits as a Layer 3
+Story anchored via `cluster_root_id`.
+
+**Resume (E13-08).** `GET /api/sessions/resumable` returns the owner's most
+recent `in_progress` session; the web app offers "Continue with Seth" and the
+chapter, carries, and closed doors come back exactly as left.
+
+**PWA.** Installable from mobile Safari (manifest + icons + minimal service
+worker; no fetch caching — the live loop is never intercepted). Mic permission
+is requested on the "Begin with Seth" tap (a user gesture, required by iOS).
+Requires HTTPS in production.
+
+## Deploying on Vercel
+
+One project, repo root:
+- `vercel.json` builds `apps/web` (static, `apps/web/dist`) and runs the whole
+  Express app as a single function (`api/index.ts`); `/api/*` is rewritten to it.
+- Set env vars in Vercel (Production): `FIRST_THREAD_VOICE=true`,
+  `VITE_FIRST_THREAD_VOICE=true`, `HUME_API_KEY`, `HUME_SECRET_KEY`,
+  `HUME_CONFIG_ID`, `ANTHROPIC_API_KEY`, `SUPABASE_URL`,
+  `SUPABASE_SERVICE_ROLE_KEY`, `OWNER_SUBSCRIBER_ID`.
+- Point the Hume EVI config's custom language model URL at
+  `https://<deployment>/api/clm/chat/completions`.
+- Smoke: `GET /api/health` → `{ ok: true, firstThreadVoice: true }`.

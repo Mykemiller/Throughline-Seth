@@ -185,3 +185,36 @@ code {
 .ft-card--muted code {
   background: rgba(242, 230, 188, 0.14);
 }
+
+/* ── Photo capture (E13-05/06) ─────────────────────────────────────────── */
+
+.ft-photo {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  flex-wrap: wrap;
+  margin-top: var(--tl-space-3);
+}
+
+.ft-photo__retain {
+  font-size: 13px;
+  color: var(--tl-parchment-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ft-photo__note {
+  width: 100%;
+  margin: var(--tl-space-1) 0 0;
+  font-family: var(--tl-font-display);
+  font-style: italic;
+  color: var(--tl-parchment-dim);
+}
+
+.ft-resume-note {
+  font-family: var(--tl-font-display);
+  font-style: italic;
+  color: var(--tl-parchment-dim);
+  margin: 0 0 var(--tl-space-2);
+}

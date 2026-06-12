@@ -12,11 +12,12 @@ import type { ExchangeRole } from '@throughline/shared';
 import { FIRST_THREAD_VOICE, PORT, requireSecrets } from './env.js';
 import { handleClmRequest } from './clm.js';
 import { mintHumeAccessToken } from './humeToken.js';
-import { appendExchange, createSession, updateSession } from './supabase.js';
+import { appendExchange, createSession, findResumableSession, getSession, updateSession } from './supabase.js';
+import { handlePhotoUpload } from './photos.js';
 
-const app = express();
+export const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '25mb' })); // photo uploads ride JSON base64 in the prototype
 
 // Health check is always available (useful for "is the flag on?" diagnostics).
 app.get('/api/health', (_req, res) => {
@@ -92,11 +93,41 @@ app.post('/api/exchanges', requireFlag, async (req, res) => {
   }
 });
 
+// Resume: most recent in_progress session for the owner (E13-08).
+app.get('/api/sessions/resumable', requireFlag, async (_req, res) => {
+  try {
+    res.json((await findResumableSession()) ?? {});
+  } catch (err) {
+    console.error('[sessions:resumable]', err);
+    res.status(500).json({ error: 'failed to look up resumable session' });
+  }
+});
+
+// Live flow state for the UI (chapter, pending draft/photo, active Moment).
+app.get('/api/sessions/:id/state', requireFlag, async (req, res) => {
+  try {
+    const session = await getSession(req.params.id!);
+    if (!session) {
+      res.status(404).json({ error: 'session not found' });
+      return;
+    }
+    res.json({ snapshot: session.snapshot });
+  } catch (err) {
+    console.error('[sessions:state]', err);
+    res.status(500).json({ error: 'failed to load session state' });
+  }
+});
+
+// Photo upload: EXIF-stripped bytes from the browser → Storage → media_assets
+// pinned to the active Moment (E13-05/06, THOUG-132).
+app.post('/api/photos', requireFlag, handlePhotoUpload);
+
 // The Hume EVI 3 BYO-LLM endpoint. Hume's config points its custom language
 // model at this path; it streams OpenAI-compatible chat-completion chunks.
 app.post('/api/clm/chat/completions', requireFlag, handleClmRequest);
 
 function start(): void {
+  if (process.env.VERCEL) return; // serverless: Vercel invokes the exported app
   if (FIRST_THREAD_VOICE) {
     // Fail fast and loud if a required secret is missing — never improvise.
     try {

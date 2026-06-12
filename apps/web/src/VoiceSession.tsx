@@ -1,21 +1,22 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { VoiceProvider, useVoice } from '@humeai/voice-react';
 import type { SessionStateSnapshot } from '@throughline/shared';
-import { createSession, fetchHumeToken, setSessionStatus } from './api';
+import { createSession, fetchHumeToken, fetchResumable, fetchSessionState, setSessionStatus } from './api';
 import { useTranscriptPersistence } from './useTranscriptPersistence';
+import { PhotoCapture } from './PhotoCapture';
 
 interface Ready {
   accessToken: string;
   configId: string;
   sessionId: string;
   snapshot: SessionStateSnapshot;
+  resumed: boolean;
 }
 
 /**
- * Boots a First Thread session: mints a Hume access token and creates the
- * rot_capture_sessions row, then mounts the EVI VoiceProvider. The browser owns
- * the live audio loop (mic, STT, prosody, turn-taking, barge-in, playback);
- * Claude reasons behind Hume via the server's BYO-LLM endpoint.
+ * Boots a First Thread session: mints a Hume access token, then either RESUMES
+ * the most recent in-progress session (E13-08 — closed doors stay closed
+ * across resume) or creates a fresh rot_capture_sessions row.
  */
 export function VoiceSession() {
   const [ready, setReady] = useState<Ready | null>(null);
@@ -25,11 +26,23 @@ export function VoiceSession() {
     let cancelled = false;
     (async () => {
       try {
-        const [{ accessToken, configId }, { sessionId, snapshot }] = await Promise.all([
+        const [{ accessToken, configId }, resumable] = await Promise.all([
           fetchHumeToken(),
-          createSession(),
+          fetchResumable(),
         ]);
-        if (!cancelled) setReady({ accessToken, configId, sessionId, snapshot });
+        if (resumable.sessionId && resumable.snapshot) {
+          if (!cancelled)
+            setReady({
+              accessToken,
+              configId,
+              sessionId: resumable.sessionId,
+              snapshot: resumable.snapshot,
+              resumed: true,
+            });
+          return;
+        }
+        const { sessionId, snapshot } = await createSession();
+        if (!cancelled) setReady({ accessToken, configId, sessionId, snapshot, resumed: false });
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       }
@@ -44,7 +57,9 @@ export function VoiceSession() {
       <section className="ft-card ft-card--muted">
         <h2>Couldn’t start the session</h2>
         <p className="ft-error">{error}</p>
-        <p>Check that the server is running with <code>FIRST_THREAD_VOICE=true</code> and all secrets set.</p>
+        <p>
+          Check that the server is running with <code>FIRST_THREAD_VOICE=true</code> and all secrets set.
+        </p>
       </section>
     );
   }
@@ -60,49 +75,73 @@ export function VoiceSession() {
   return <ConnectedSession {...ready} />;
 }
 
-function ConnectedSession({ accessToken, configId, sessionId, snapshot }: Ready) {
+function ConnectedSession({ accessToken, configId, sessionId, snapshot, resumed }: Ready) {
   const { handleMessage } = useTranscriptPersistence(sessionId);
   return (
     <VoiceProvider onMessage={handleMessage} onError={(e) => console.error('[hume]', e)}>
-      <SethPanel accessToken={accessToken} configId={configId} sessionId={sessionId} snapshot={snapshot} />
+      <SethPanel
+        accessToken={accessToken}
+        configId={configId}
+        sessionId={sessionId}
+        initialSnapshot={snapshot}
+        resumed={resumed}
+      />
     </VoiceProvider>
   );
 }
 
+/** Display titles for the locked v0.2 chapter spine. */
 const CHAPTER_LABELS: Record<string, string> = {
-  opening: 'Opening',
-  roots: 'Roots',
-  childhood: 'Childhood',
-  coming_of_age: 'Coming of age',
-  work_and_craft: 'Work & craft',
-  love_and_family: 'Love & family',
-  reflection: 'Reflection',
+  first_light: 'First Light',
+  school_years: 'The School Years',
+  becoming: 'Becoming',
+  world_you_built: 'The World You Built',
+  what_stayed: 'What Stayed',
+  still_becoming: 'Still Becoming',
+  last_night: 'Last Night',
 };
 
 function SethPanel({
   accessToken,
   configId,
   sessionId,
-  snapshot,
+  initialSnapshot,
+  resumed,
 }: {
   accessToken: string;
   configId: string;
   sessionId: string;
-  snapshot: SessionStateSnapshot;
+  initialSnapshot: SessionStateSnapshot;
+  resumed: boolean;
 }) {
   const { connect, disconnect, status, isMuted, mute, unmute, messages } = useVoice();
+  const [snapshot, setSnapshot] = useState(initialSnapshot);
 
   const connected = status.value === 'connected';
   const connecting = status.value === 'connecting';
+
+  const refreshState = useCallback(async () => {
+    try {
+      const { snapshot: fresh } = await fetchSessionState(sessionId);
+      setSnapshot(fresh);
+    } catch (e) {
+      console.error('state refresh failed', e);
+    }
+  }, [sessionId]);
+
+  // The flow state lives server-side; poll lightly while connected so the
+  // chapter marker and photo affordance track the conversation.
+  useEffect(() => {
+    if (!connected) return;
+    const t = setInterval(() => void refreshState(), 4000);
+    return () => clearInterval(t);
+  }, [connected, refreshState]);
 
   const start = async () => {
     try {
       await connect({
         auth: { type: 'accessToken', value: accessToken },
         configId,
-        // custom_session_id is forwarded by Hume to our BYO-LLM endpoint so the
-        // server can load the flow snapshot and persist state for this exact
-        // session. On EVI it travels in session settings.
         sessionSettings: { type: 'session_settings', customSessionId: sessionId },
       });
     } catch (e) {
@@ -130,19 +169,27 @@ function SethPanel({
   return (
     <section className="ft-card ft-session">
       <div className="ft-session__bar">
-        <span className="ft-chapter">Chapter · {CHAPTER_LABELS[snapshot.chapterId] ?? snapshot.chapterId}</span>
+        <span className="ft-chapter">
+          Chapter · {CHAPTER_LABELS[snapshot.chapterId] ?? snapshot.chapterId}
+        </span>
         <span className={`ft-status ft-status--${status.value}`}>{status.value}</span>
       </div>
 
+      {resumed && !connected && (
+        <p className="ft-resume-note">
+          Picking up where you left off — {CHAPTER_LABELS[snapshot.chapterId]}.
+        </p>
+      )}
+
       <p className="ft-seth-intro">
-        Seth is your First Thread Companion. Speak naturally — you can interrupt at any time, and if there’s anything
-        you’d rather not talk about, just say so and we’ll leave it there.
+        Seth is your First Thread Companion. Speak naturally — you can interrupt at any time, and if
+        there’s anything you’d rather not talk about, just say so and we’ll leave it there.
       </p>
 
       <div className="ft-controls">
         {!connected ? (
           <button className="ft-btn ft-btn--primary" onClick={start} disabled={connecting}>
-            {connecting ? 'Connecting…' : 'Begin with Seth'}
+            {connecting ? 'Connecting…' : resumed ? 'Continue with Seth' : 'Begin with Seth'}
           </button>
         ) : (
           <>
@@ -156,14 +203,27 @@ function SethPanel({
         )}
       </div>
 
+      {connected && (
+        <PhotoCapture
+          sessionId={sessionId}
+          hasActiveMoment={Boolean(snapshot.activeMomentId)}
+          onPinned={() => void refreshState()}
+        />
+      )}
+
       <ol className="ft-transcript">
         {transcript.map((m, i) => (
-          <li key={i} className={m.type === 'assistant_message' ? 'ft-line ft-line--seth' : 'ft-line ft-line--you'}>
+          <li
+            key={i}
+            className={m.type === 'assistant_message' ? 'ft-line ft-line--seth' : 'ft-line ft-line--you'}
+          >
             <span className="ft-line__who">{m.type === 'assistant_message' ? 'Seth' : 'You'}</span>
             <span className="ft-line__text">{m.message?.content}</span>
           </li>
         ))}
-        {transcript.length === 0 && <li className="ft-line ft-line--empty">Your conversation will appear here.</li>}
+        {transcript.length === 0 && (
+          <li className="ft-line ft-line--empty">Your conversation will appear here.</li>
+        )}
       </ol>
     </section>
   );

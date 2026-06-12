@@ -42,3 +42,35 @@ export async function appendExchange(args: {
     }),
   );
 }
+
+/** Resume lookup: most recent in_progress session for the owner (E13-08). */
+export async function fetchResumable(): Promise<
+  { sessionId?: string; snapshot?: SessionStateSnapshot }
+> {
+  return json(await fetch('/api/sessions/resumable'));
+}
+
+/** Live flow state (chapter, pending draft/photo, active Moment). */
+export async function fetchSessionState(
+  sessionId: string,
+): Promise<{ snapshot: SessionStateSnapshot }> {
+  return json(await fetch(`/api/sessions/${sessionId}/state`));
+}
+
+/** Upload an EXIF-stripped photo; pins to the session's active Moment. */
+export async function uploadPhoto(args: {
+  sessionId: string;
+  strippedBase64: string;
+  originalBase64?: string;
+  retainOriginal: boolean;
+  whenText?: string;
+  whereText?: string;
+}): Promise<{ assetId: string; momentId: string }> {
+  return json(
+    await fetch('/api/photos', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(args),
+    }),
+  );
+}
