@@ -104,7 +104,7 @@ export function getChapter(id: ChapterId): ChapterScaffold {
  */
 export function initialStateSnapshot(): SessionStateSnapshot {
   return {
-    chapterId: CHAPTER_ORDER[0],
+    chapterId: CHAPTER_ORDER[0]!,
     followUpSpent: false,
     closedScopes: [],
     carry: {},

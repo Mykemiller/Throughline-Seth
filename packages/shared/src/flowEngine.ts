@@ -17,7 +17,7 @@ import { CHAPTER_ORDER } from './sethScaffold.js';
 /** Advance to the next chapter, resetting the per-chapter follow-up budget. */
 export function advanceChapter(snapshot: SessionStateSnapshot): SessionStateSnapshot {
   const idx = CHAPTER_ORDER.indexOf(snapshot.chapterId);
-  const next = CHAPTER_ORDER[Math.min(idx + 1, CHAPTER_ORDER.length - 1)];
+  const next = CHAPTER_ORDER[Math.min(idx + 1, CHAPTER_ORDER.length - 1)]!;
   return { ...snapshot, chapterId: next, followUpSpent: false };
 }
 
