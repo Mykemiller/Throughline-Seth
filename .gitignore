@@ -9,3 +9,6 @@ build/
 .vite/
 coverage/
 *.tsbuildinfo
+
+# Generated serverless bundle (built by scripts/build-vercel.mjs)
+api/index.mjs
