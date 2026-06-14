@@ -232,6 +232,36 @@ code {
   min-width: 0;
 }
 
+/* ── Companion portrait (left column) ──────────────────────────────────── */
+
+.ft-portrait {
+  flex: 0 0 200px;
+  position: sticky;
+  top: var(--tl-space-3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--tl-space-2);
+}
+
+.ft-portrait__img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: var(--tl-radius);
+  border: 1px solid rgba(242, 230, 188, 0.18);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.ft-portrait__caption {
+  margin: 0;
+  font-family: var(--tl-font-display);
+  font-style: italic;
+  font-size: 14px;
+  color: var(--tl-parchment-dim);
+  text-align: center;
+}
+
 .ft-rail {
   flex: 0 0 224px;
   position: sticky;
@@ -355,6 +385,13 @@ code {
 @media (max-width: 760px) {
   .ft-session-layout {
     flex-direction: column;
+    align-items: center;
+  }
+  .ft-portrait {
+    position: static;
+    flex-basis: auto;
+    width: 160px;
+    order: -2;
   }
   .ft-rail {
     position: static;

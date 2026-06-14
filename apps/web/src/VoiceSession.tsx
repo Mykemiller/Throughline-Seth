@@ -185,6 +185,15 @@ function SethPanel({
 
   return (
     <div className="ft-session-layout">
+      <aside className="ft-portrait" aria-label="Seth, your Companion">
+        <img
+          className="ft-portrait__img"
+          src="/seth-portrait.jpg"
+          alt="A portrait of Seth, your First Thread Companion"
+        />
+        <p className="ft-portrait__caption">Seth · your Companion</p>
+      </aside>
+
       <section className="ft-card ft-session">
       <div className="ft-session__bar">
         <span className="ft-chapter">
