@@ -104,6 +104,13 @@ export interface PendingPhoto {
   /** Validated text metadata extracted client-side (EXIF parsed in browser). */
   whenText?: string;
   whereText?: string;
+  /**
+   * A short, grounded vision "review" of what is visibly in the photo — an
+   * observation of the image artifact only (never an identification or
+   * backstory). Lets Seth gently reference the picture; he still proposes,
+   * never asserts.
+   */
+  description?: string;
 }
 
 /**

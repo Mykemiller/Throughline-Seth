@@ -119,6 +119,63 @@ export async function generateSethTurn(args: {
   return { spokenText, payload, stopReason: final.stop_reason };
 }
 
+/**
+ * Vision "review" of a just-added photograph (THOUG-132). Produces a SHORT,
+ * literal description of what is *visibly* in the EXIF-stripped derivative so
+ * Seth can gently reference it — never to assert identities or invent facts
+ * about the person's life (No-confabulation rule). The description is an
+ * observation of the image artifact only; Seth still proposes, never asserts.
+ *
+ * Best-effort: returns undefined on any failure so a vision hiccup never blocks
+ * the photo pin or the conversation.
+ */
+export async function describePhotograph(args: {
+  strippedJpegBase64: string;
+  signal?: AbortSignal;
+}): Promise<string | undefined> {
+  try {
+    const message = await client().messages.create(
+      {
+        model: CLAUDE_MODEL,
+        max_tokens: 160,
+        system:
+          'You help a warm family-history companion notice an old photograph. ' +
+          'Describe ONLY what is literally visible in the image in one or two plain ' +
+          'sentences — setting, number of people, apparent era from clothing/photo style, ' +
+          'objects, mood. Do NOT name or identify anyone, do NOT guess who they are or ' +
+          'their relationships, and do NOT invent any backstory. If something is unclear, ' +
+          'say so plainly. Keep it short and neutral.',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/jpeg',
+                  data: args.strippedJpegBase64,
+                },
+              },
+              { type: 'text', text: 'What is visibly in this photograph?' },
+            ],
+          },
+        ],
+      },
+      { signal: args.signal },
+    );
+    const text = message.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join(' ')
+      .trim();
+    return text || undefined;
+  } catch (err) {
+    console.error('[claude] photo description failed (non-fatal):', err);
+    return undefined;
+  }
+}
+
 /** Validate/narrow the tool input into a typed FirstThreadPayload. */
 function coercePayload(input: unknown, chapterId: ChapterId): FirstThreadPayload | null {
   if (!input || typeof input !== 'object') return null;

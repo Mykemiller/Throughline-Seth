@@ -323,7 +323,11 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
     ? `\n\nA PHOTOGRAPH was just added to the Moment you're discussing${
         ctx.pendingPhoto.whenText ? ` (it appears to be from ${ctx.pendingPhoto.whenText}` +
         (ctx.pendingPhoto.whereText ? `, near ${ctx.pendingPhoto.whereText}` : '') + ' — propose, never assert)' : ''
-      }. Invite them to tell you about it — who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.`
+      }.${
+        ctx.pendingPhoto.description
+          ? ` Looking at it, you can see: ${ctx.pendingPhoto.description} This is only what is visible in the image — you may gently reference one detail you notice to show you're looking with them, but NEVER name or identify anyone, NEVER assert who they are or their story. Let them tell you.`
+          : ''
+      } Invite them to tell you about it — who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.`
     : '';
 
   const completeness =

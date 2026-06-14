@@ -400,7 +400,7 @@ You have just gently recapped the Moments you've been holding onto and asked whe
 AWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the River. If the person's last turn was a clear yes, you may consider it placed (the app commits it \u2014 do not say "saved", just move on warmly). If they corrected it, re-propose ONCE with the correction via the tool. If they declined, let it go without comment.` : "";
   const photo = ctx.pendingPhoto ? `
 
-A PHOTOGRAPH was just added to the Moment you're discussing${ctx.pendingPhoto.whenText ? ` (it appears to be from ${ctx.pendingPhoto.whenText}` + (ctx.pendingPhoto.whereText ? `, near ${ctx.pendingPhoto.whereText}` : "") + " \u2014 propose, never assert)" : ""}. Invite them to tell you about it \u2014 who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.` : "";
+A PHOTOGRAPH was just added to the Moment you're discussing${ctx.pendingPhoto.whenText ? ` (it appears to be from ${ctx.pendingPhoto.whenText}` + (ctx.pendingPhoto.whereText ? `, near ${ctx.pendingPhoto.whereText}` : "") + " \u2014 propose, never assert)" : ""}.${ctx.pendingPhoto.description ? ` Looking at it, you can see: ${ctx.pendingPhoto.description} This is only what is visible in the image \u2014 you may gently reference one detail you notice to show you're looking with them, but NEVER name or identify anyone, NEVER assert who they are or their story. Let them tell you.` : ""} Invite them to tell you about it \u2014 who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.` : "";
   const completeness = ctx.confirmedInChapter > 0 && ctx.followUpSpent ? `
 
 This chapter has a confirmed Moment. When it feels complete, emit chapter_complete via the tool (with a carryDetail) and speak the transition into the next chapter, carrying: ${chapter.transitionCarry}.` : `
@@ -653,6 +653,39 @@ async function generateSethTurn(args) {
     }
   }
   return { spokenText, payload, stopReason: final.stop_reason };
+}
+async function describePhotograph(args) {
+  try {
+    const message = await client().messages.create(
+      {
+        model: CLAUDE_MODEL,
+        max_tokens: 160,
+        system: "You help a warm family-history companion notice an old photograph. Describe ONLY what is literally visible in the image in one or two plain sentences \u2014 setting, number of people, apparent era from clothing/photo style, objects, mood. Do NOT name or identify anyone, do NOT guess who they are or their relationships, and do NOT invent any backstory. If something is unclear, say so plainly. Keep it short and neutral.",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/jpeg",
+                  data: args.strippedJpegBase64
+                }
+              },
+              { type: "text", text: "What is visibly in this photograph?" }
+            ]
+          }
+        ]
+      },
+      { signal: args.signal }
+    );
+    const text = message.content.filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+    return text || void 0;
+  } catch (err) {
+    console.error("[claude] photo description failed (non-fatal):", err);
+    return void 0;
+  }
 }
 function coercePayload(input, chapterId) {
   if (!input || typeof input !== "object") return null;
@@ -1308,12 +1341,14 @@ async function handlePhotoUpload(req, res) {
       original,
       retainOriginal: retainOriginal === true
     });
+    const description = await describePhotograph({ strippedJpegBase64: strippedBase64 });
     let snapshot = clearDraft(session.snapshot);
     snapshot = pinPhoto(snapshot, {
       assetId,
       momentId: session.snapshot.activeMomentId,
       whenText: typeof whenText === "string" && whenText ? whenText : void 0,
-      whereText: typeof whereText === "string" && whereText ? whereText : void 0
+      whereText: typeof whereText === "string" && whereText ? whereText : void 0,
+      description
     });
     await updateSession(sessionId, { snapshot });
     res.json({ assetId, momentId: session.snapshot.activeMomentId });
