@@ -72,6 +72,8 @@ export function reviveSnapshot(raw: unknown): SessionStateSnapshot {
     // the introduction for a session that was already mid-conversation.
     phase: o.phase === 'intro' || o.phase === 'walk' ? o.phase : 'walk',
     subscriberName: typeof o.subscriberName === 'string' ? o.subscriberName : null,
+    recapPending: Boolean(o.recapPending),
+    nextSessionRecapPending: Boolean(o.nextSessionRecapPending),
   };
 }
 

@@ -38,6 +38,15 @@ function db(): SupabaseClient {
 export async function createSession(): Promise<{ sessionId: string; snapshot: SessionStateSnapshot }> {
   const { OWNER_SUBSCRIBER_ID } = requireSecrets();
   const snapshot = initialStateSnapshot();
+  // Next-session recap (v0.3): if the subscriber already has committed Moments
+  // from a prior session, open this one with Seth's brief recap of them.
+  const prior = await db()
+    .from('rot_moments')
+    .select('moment_id', { count: 'exact', head: true })
+    .eq('subscriber_id', OWNER_SUBSCRIBER_ID)
+    .eq('source', 'first_thread_voice')
+    .eq('status', 'committed');
+  if ((prior.count ?? 0) > 0) snapshot.nextSessionRecapPending = true;
   const { data, error } = await db()
     .from('rot_capture_sessions')
     .insert({
@@ -107,16 +116,17 @@ export async function appendExchange(args: {
 /** Session context the CLM turn needs: who + where the flow stands. */
 export async function getSession(
   sessionId: string,
-): Promise<{ subscriberId: string; snapshot: SessionStateSnapshot } | null> {
+): Promise<{ subscriberId: string; snapshot: SessionStateSnapshot; recapLastAt: string | null } | null> {
   const { data, error } = await db()
     .from('rot_capture_sessions')
-    .select('subscriber_id, state_snapshot')
+    .select('subscriber_id, state_snapshot, recap_last_at')
     .eq('session_id', sessionId)
     .single();
   if (error || !data) return null;
   return {
     subscriberId: data.subscriber_id as string,
     snapshot: reviveSnapshot(data.state_snapshot),
+    recapLastAt: (data.recap_last_at as string | null) ?? null,
   };
 }
 

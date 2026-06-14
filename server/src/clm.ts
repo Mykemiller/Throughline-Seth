@@ -1,8 +1,10 @@
 /**
  * The Hume EVI 3 "custom language model" (BYO-LLM) endpoint — full turn flow.
  *
+ * v0.3 — Ambient Write + Timed Recap model (2026-06-14, THOUG-132)
+ *
  * Hume owns the voice (transport, STT, prosody, turn-taking, barge-in, TTS);
- * this endpoint owns the brain. Per-turn order (v0.2 spec §2, §4):
+ * this endpoint owns the brain. Per-turn order:
  *
  *   1. DETERMINISTIC reverence pre-filter on the latest subscriber turn,
  *      BEFORE Claude (defense-in-depth #1). On a hit: in-memory block FIRST
@@ -11,15 +13,27 @@
  *   2. Pre-prompt gate (#3): the utterance is checked against closed-scope
  *      match_tokens; a touch is treated as subscriber-initiated mention — we
  *      do NOT re-open, Claude is told the door stays closed.
- *   3. Pending-draft confirmation (E13-04): a staged draft + spoken "yes" →
- *      the ONLY path to a River write. Decline discards. Unclear leaves it
- *      staged and lets Seth re-ask naturally.
- *   4. Claude (consuming sethScaffold) streams Seth's spoken turn; an optional
+ *   3. RECAP CHECK — fires BEFORE Claude if either recap trigger is active:
+ *      a. Chapter boundary: snapshot.chapterId changed since last turn
+ *      b. 20-min elapsed: now - session.recap_last_at > 20 minutes (or null)
+ *      Seth speaks the recap prompt; pending_review rows are surfaced. On the
+ *      subscriber's NEXT turn, their response (confirm/drop/closed-door) is
+ *      processed before Claude runs again.
+ *   4. RECAP RESPONSE processing — if snapshot.recapPending is true and the
+ *      subscriber just responded, process their confirm/drop/closed-door
+ *      verdicts, commit or drop rows, clear recapPending.
+ *   5. Claude (consuming sethScaffold) streams Seth's spoken turn; an optional
  *      typed payload rides the SEPARATE tool channel (never spoken).
- *   5. chapter_complete payloads advance the engine only if legal (≥1
- *      confirmed Moment in chapter — never forced).
- *   6. Snapshot persisted to rot_capture_sessions.state_snapshot every turn
+ *      moment_draft / story_draft → writeAmbientMoment/Story() immediately
+ *      (no mid-conversation confirmation request).
+ *   6. chapter_complete payloads advance the engine only if legal (≥1
+ *      committed Moment in chapter — never forced).
+ *   7. Snapshot persisted to rot_capture_sessions.state_snapshot every turn
  *      (E13-08 recovery).
+ *
+ * NEXT-SESSION RECAP: at session open (turn 1, phase='walk', prior session
+ * exists with committed moments), Seth speaks the prior-session recap before
+ * proceeding. This is set via snapshot.nextSessionRecapPending on initialise.
  */
 import type { Request, Response } from 'express';
 import {
@@ -45,7 +59,23 @@ import {
 } from '@throughline/shared';
 import { generateSethTurn } from './claude.js';
 import { appendExchange, getSession, updateSession } from './supabase.js';
-import { commitMomentDraft, commitStoryDraft, recordClosedTopicEvent } from './riverWrites.js';
+import {
+  buildMidSessionRecapPrompt,
+  buildNextSessionRecapPrompt,
+  commitMomentDraft,
+  commitPendingReview,
+  commitStoryDraft,
+  dropPendingReview,
+  getPendingReviewRows,
+  getPriorSessionMoments,
+  markRecapFired,
+  recordClosedTopicEvent,
+  writeAmbientMoment,
+  writeAmbientStory,
+} from './riverWrites.js';
+
+/** 20 minutes in milliseconds — the time-based recap trigger. */
+const RECAP_INTERVAL_MS = 20 * 60 * 1000;
 
 /** Emit one OpenAI-style chat.completion.chunk carrying spoken text. */
 function sseChunk(res: Response, content: string): void {
@@ -69,6 +99,12 @@ function latestSubscriberUtterance(messages: ClmMessage[]): string {
   return '';
 }
 
+/** True if 20+ minutes have elapsed since the last recap (or no recap ever). */
+function recapTimeElapsed(recapLastAt: string | null): boolean {
+  if (!recapLastAt) return false; // no recap yet — we fire on chapter boundary first
+  return Date.now() - new Date(recapLastAt).getTime() > RECAP_INTERVAL_MS;
+}
+
 export async function handleClmRequest(req: Request, res: Response): Promise<void> {
   const body = req.body as ClmRequestBody;
   const messages = Array.isArray(body?.messages) ? body.messages : [];
@@ -82,22 +118,41 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
   const abort = new AbortController();
   req.on('close', () => abort.abort());
 
-  // Load session context (who + flow state). Without a session we still speak,
-  // but nothing persists and nothing can ever be written.
   const session = sessionId ? await getSession(sessionId) : null;
   let snapshot: SessionStateSnapshot = session?.snapshot ?? initialStateSnapshot();
   const subscriberId = session?.subscriberId ?? null;
 
   const utterance = latestSubscriberUtterance(messages);
+  const previousChapterId = snapshot.chapterId;
   snapshot = nextTurn(snapshot);
 
   // ── 1. P0: deterministic reverence pre-filter (BEFORE Claude) ────────────
   const closed = detectClosedDoor(utterance);
   if (closed) {
-    // Defense-in-depth #2: block in memory FIRST — before any await, so the
-    // next utterance in this session can never race the durable write.
     snapshot = closeScope(snapshot, closed.phrase);
-    snapshot = clearDraft(snapshot); // a staged draft on a closed door dies with it
+    snapshot = clearDraft(snapshot);
+
+    // If we're in a recap and the subscriber closed a topic on a pending row,
+    // find and drop the matching pending_review row.
+    if (snapshot.recapPending && subscriberId && sessionId) {
+      const pendingRows = await safe(() =>
+        getPendingReviewRows({ subscriberId, sessionId }),
+      ) ?? [];
+      const matchingRow = pendingRows.find(
+        (r) => r.title.toLowerCase().includes(closed.phrase.toLowerCase()),
+      );
+      if (matchingRow) {
+        await safe(() => dropPendingReview(matchingRow.momentId));
+        await safe(() =>
+          appendExchange({
+            sessionId,
+            role: 'system',
+            content: `[recap/reverence] dropped pending_review "${matchingRow.title}" on closed-door signal`,
+          }),
+        );
+      }
+    }
+
     if (sessionId && subscriberId) {
       await safe(() =>
         appendExchange({
@@ -126,9 +181,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
     return;
   }
 
-  // ── 2.5 Intro phase: Seth's spoken introduction + name capture ──────────
-  // Runs once before First Light. No drafts, no chapter logic — Seth introduces
-  // himself, frames the walk, reassures about pause/resume, and learns the name.
+  // ── 2. Intro phase ────────────────────────────────────────────────────────
   if (snapshot.phase === 'intro') {
     const introPrompt = buildSethIntroPrompt({ subscriberName: snapshot.subscriberName });
     try {
@@ -146,7 +199,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
             appendExchange({
               sessionId,
               role: 'system',
-              content: `[intro] name captured \u2192 "${snapshot.subscriberName ?? ''}"; entering ${snapshot.chapterId}`,
+              content: `[intro] name captured → "${snapshot.subscriberName ?? ''}"; entering ${snapshot.chapterId}`,
             }),
           );
         }
@@ -160,55 +213,123 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
         return;
       }
       console.error('[clm] intro generation error:', err);
-      sseChunk(res, "I'm sorry \u2014 I lost my thread for a moment. Could you say that once more?");
+      sseChunk(res, "I'm sorry — I lost my thread for a moment. Could you say that once more?");
       sseDone(res);
     }
     return;
   }
 
-  // ── 3. Pending-draft confirmation (the ONLY path to a River write) ───────
-  if (snapshot.pendingDraft && subscriberId && sessionId) {
+  // ── 3. Next-session recap (turn 1 of a new session, prior moments exist) ──
+  // Fires once per new session, before any chapter work. Seth speaks the recap
+  // then waits for a natural "yes, carry on" before proceeding.
+  if (snapshot.nextSessionRecapPending && subscriberId && sessionId) {
     const verdict = detectConfirmation(utterance);
-    if (verdict === 'confirm') {
-      const pending = snapshot.pendingDraft;
-      try {
-        const committed =
-          pending.payload.kind === 'moment_draft'
-            ? await commitMomentDraft({
-                subscriberId,
-                sessionId,
-                draft: pending.payload,
-                turn: pending.stagedAtTurn,
-              })
-            : await commitStoryDraft({
-                subscriberId,
-                sessionId,
-                draft: pending.payload,
-                turn: pending.stagedAtTurn,
-                anchorMomentId: snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId,
-              });
-        snapshot = recordConfirmedMoment(snapshot, committed.momentId);
-        if (pending.payload.kind === 'story_draft' && snapshot.pendingPhoto) {
-          // Photo commentary captured → story committed; unpin the photo.
-          snapshot = clearPhoto(snapshot);
+    if (verdict === 'confirm' || snapshot.turn > 1) {
+      // Subscriber acknowledged — clear the flag and fall through to normal flow.
+      snapshot = { ...snapshot, nextSessionRecapPending: false };
+    } else {
+      // First utterance of the session — speak the next-session recap.
+      const priorMoments = await safe(() =>
+        getPriorSessionMoments({ subscriberId, currentSessionId: sessionId }),
+      ) ?? [];
+      if (priorMoments.length > 0) {
+        const recapText = buildNextSessionRecapPrompt(priorMoments);
+        sseChunk(res, recapText);
+        await safe(() =>
+          appendExchange({
+            sessionId,
+            role: 'system',
+            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments`,
+          }),
+        );
+        await safe(() => updateSession(sessionId, { snapshot }));
+        sseDone(res);
+        return;
+      }
+      // No prior moments — nothing to recap; clear flag and proceed.
+      snapshot = { ...snapshot, nextSessionRecapPending: false };
+    }
+  }
+
+  // ── 4. Recap response processing ──────────────────────────────────────────
+  // If the previous turn triggered a mid-session recap, process the
+  // subscriber's response before consulting Claude.
+  if (snapshot.recapPending && subscriberId && sessionId) {
+    const pendingRows = await safe(() =>
+      getPendingReviewRows({ subscriberId, sessionId }),
+    ) ?? [];
+
+    const verdict = detectConfirmation(utterance);
+
+    if (verdict === 'confirm' || utterance.trim() === '') {
+      // Confirm all pending_review rows.
+      if (pendingRows.length > 0) {
+        const ids = pendingRows.map((r) => r.momentId);
+        await safe(() => commitPendingReview(ids));
+        for (const row of pendingRows) {
+          snapshot = recordConfirmedMoment(snapshot, row.momentId);
         }
         await safe(() =>
           appendExchange({
             sessionId,
             role: 'system',
-            content: `[river] confirmed ${pending.payload.kind} "${pending.payload.title}" → moment ${committed.momentId}${committed.merged ? ' (idempotent merge)' : ''}`,
+            content: `[recap] confirmed ${ids.length} moments: ${pendingRows.map((r) => r.title).join(', ')}`,
           }),
         );
-      } catch (err) {
-        console.error('[clm] river commit failed:', err);
       }
+      snapshot = { ...snapshot, recapPending: false };
     } else if (verdict === 'decline') {
-      snapshot = clearDraft(snapshot);
+      // Drop all pending rows (subscriber rejected the batch).
+      for (const row of pendingRows) {
+        await safe(() => dropPendingReview(row.momentId));
+      }
+      await safe(() =>
+        appendExchange({
+          sessionId,
+          role: 'system',
+          content: `[recap] subscriber declined batch — dropped ${pendingRows.length} pending_review rows`,
+        }),
+      );
+      snapshot = { ...snapshot, recapPending: false };
     }
-    // 'unclear' → leave staged; Seth re-asks naturally via the prompt context.
+    // 'unclear' → leave recapPending=true; Seth re-asks gently via prompt context.
   }
 
-  // ── 4. Claude speaks Seth's turn (scaffold-built prompt only) ────────────
+  // ── 5. Mid-session recap trigger check ───────────────────────────────────
+  // Fires at the EARLIER of chapter boundary or 20-min elapsed.
+  // Does not fire if a recap is already pending.
+  if (!snapshot.recapPending && subscriberId && sessionId) {
+    const chapterBoundary = snapshot.chapterId !== previousChapterId;
+    const timeElapsed = recapTimeElapsed(session?.recapLastAt ?? null);
+
+    if ((chapterBoundary || timeElapsed) && snapshot.turn > 1) {
+      const pendingRows = await safe(() =>
+        getPendingReviewRows({ subscriberId, sessionId }),
+      ) ?? [];
+
+      if (pendingRows.length > 0) {
+        const recapText = buildMidSessionRecapPrompt(pendingRows);
+        sseChunk(res, recapText);
+        snapshot = { ...snapshot, recapPending: true };
+        await safe(() => markRecapFired(sessionId));
+        await safe(() =>
+          appendExchange({
+            sessionId,
+            role: 'system',
+            content: `[recap] ${chapterBoundary ? 'chapter boundary' : '20-min elapsed'} — surfaced ${pendingRows.length} pending_review rows for confirmation`,
+          }),
+        );
+        await safe(() => updateSession(sessionId, { snapshot }));
+        sseDone(res);
+        return;
+      }
+
+      // No pending rows to recap — still mark fired to reset the timer.
+      if (timeElapsed) await safe(() => markRecapFired(sessionId));
+    }
+  }
+
+  // ── 6. Claude speaks Seth's turn ──────────────────────────────────────────
   const systemPrompt = buildSethSystemPrompt({
     chapterId: snapshot.chapterId,
     subscriberName: snapshot.subscriberName,
@@ -218,6 +339,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
     pendingDraft: snapshot.pendingDraft,
     pendingPhoto: snapshot.pendingPhoto,
     confirmedInChapter: confirmedInChapter(snapshot),
+    recapPending: snapshot.recapPending,
   });
 
   try {
@@ -229,7 +351,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
       signal: abort.signal,
     });
 
-    // ── 5. Structured channel ─────────────────────────────────────────────
+    // ── 7. Structured channel ─────────────────────────────────────────────
     if (result.payload) {
       switch (result.payload.kind) {
         case 'closed_topic_event': {
@@ -246,21 +368,67 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
           snapshot = applyChapterComplete(snapshot, result.payload);
           break;
         }
-        case 'moment_draft':
+        case 'moment_draft': {
+          // AMBIENT WRITE — no confirmation gate. River row lands immediately
+          // as pending_review. Recap surface handles confirmation.
+          if (subscriberId && sessionId) {
+            const written = await safe(() =>
+              writeAmbientMoment({
+                subscriberId,
+                sessionId,
+                draft: result.payload as any,
+                turn: snapshot.turn,
+              }),
+            );
+            if (written) {
+              await safe(() =>
+                appendExchange({
+                  sessionId,
+                  role: 'system',
+                  content: `[river/ambient] moment_draft "${(result.payload as any).title}" → pending_review ${written.momentId}`,
+                }),
+              );
+            }
+          }
+          // Keep draft in snapshot for recap reference.
+          snapshot = stageDraft(snapshot, result.payload);
+          break;
+        }
         case 'story_draft': {
-          // Staged ONLY — committed exclusively on the subscriber's spoken yes.
+          // AMBIENT WRITE — same as moment_draft above.
+          if (subscriberId && sessionId) {
+            const anchorId = snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId ?? null;
+            const written = await safe(() =>
+              writeAmbientStory({
+                subscriberId,
+                sessionId,
+                draft: result.payload as any,
+                turn: snapshot.turn,
+                anchorMomentId: anchorId,
+              }),
+            );
+            if (written && snapshot.pendingPhoto) {
+              snapshot = clearPhoto(snapshot);
+            }
+            if (written) {
+              await safe(() =>
+                appendExchange({
+                  sessionId,
+                  role: 'system',
+                  content: `[river/ambient] story_draft "${(result.payload as any).title}" → pending_review ${written.momentId}`,
+                }),
+              );
+            }
+          }
           snapshot = stageDraft(snapshot, result.payload);
           break;
         }
       }
     }
 
-    // One bounded follow-up per chapter: the first Claude turn after the
-    // chapter opens may follow up; mark it spent so the prompt enforces the
-    // return to the spine. (The engine resets this on every chapter advance.)
     if (!snapshot.followUpSpent) snapshot = spendFollowUp(snapshot);
 
-    // ── 6. Persist the snapshot every turn (E13-08) ───────────────────────
+    // ── 8. Persist snapshot every turn (E13-08) ───────────────────────────
     if (sessionId) await safe(() => updateSession(sessionId, { snapshot }));
 
     sseDone(res);
@@ -277,10 +445,11 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
 }
 
 /** Run a DB side-effect without letting a write failure crash the turn. */
-async function safe(fn: () => Promise<unknown>): Promise<void> {
+async function safe<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
-    await fn();
+    return await fn();
   } catch (err) {
     console.error('[clm] persistence error (non-fatal):', err);
+    return null;
   }
 }

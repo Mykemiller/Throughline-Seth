@@ -217,7 +217,9 @@ export function initialStateSnapshot(): SessionStateSnapshot {
     confirmedMoments: {},
     phase: 'intro',
     subscriberName: null,
-    v: 3,
+    recapPending: false,
+    nextSessionRecapPending: false,
+    v: 4,
   };
 }
 
@@ -247,6 +249,8 @@ export interface BuildPromptContext {
   chapterId: ChapterId;
   /** The subscriber's name (captured in the intro), woven in warmly when present. */
   subscriberName?: string | null;
+  /** True when Seth has just surfaced recap Moments and awaits a yes/correction. */
+  recapPending?: boolean;
   followUpSpent: boolean;
   closedScopes: ClosedScope[];
   carry: Record<string, string>;
@@ -307,6 +311,10 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
     ? `\n\nYou have already used this chapter's one bounded follow-up. Return to the spine and move the chapter toward its Moment.`
     : `\n\nYou may ask at most ONE bounded follow-up in this chapter. ${chapter.followUpGuidance}`;
 
+  const recap = ctx.recapPending
+    ? `\n\nYou have just gently recapped the Moments you've been holding onto and asked whether they feel right. This turn, simply receive the person's answer — a yes, a small correction, or a "leave that one." Don't re-list everything; acknowledge warmly and carry on. The app records their verdict; never say "saved".`
+    : '';
+
   const confirm = ctx.pendingDraft
     ? `\n\nAWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the River. If the person's last turn was a clear yes, you may consider it placed (the app commits it — do not say "saved", just move on warmly). If they corrected it, re-propose ONCE with the correction via the tool. If they declined, let it go without comment.`
     : '';
@@ -330,7 +338,7 @@ Chapter opening (use this wording when opening the chapter): "${chapter.openingP
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(', ') : 'present-moment anchor'}.${
     chapter.extraGuidance ? `\n${chapter.extraGuidance}` : ''
-  }${followUp}${closed}${carry}${confirm}${photo}${completeness}
+  }${followUp}${closed}${carry}${confirm}${recap}${photo}${completeness}
 
 Speak as Seth for this turn. If — and only if — the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;

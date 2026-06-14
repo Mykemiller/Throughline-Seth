@@ -336,7 +336,9 @@ function initialStateSnapshot() {
     confirmedMoments: {},
     phase: "intro",
     subscriberName: null,
-    v: 3
+    recapPending: false,
+    nextSessionRecapPending: false,
+    v: 4
   };
 }
 var SETH_VOICE_AND_GUARDRAILS = `You are Seth, a warm, unhurried, historically literate First Thread Companion.
@@ -390,6 +392,9 @@ Carried details to weave into your transition naturally: ${JSON.stringify(ctx.ca
 You have already used this chapter's one bounded follow-up. Return to the spine and move the chapter toward its Moment.` : `
 
 You may ask at most ONE bounded follow-up in this chapter. ${chapter.followUpGuidance}`;
+  const recap = ctx.recapPending ? `
+
+You have just gently recapped the Moments you've been holding onto and asked whether they feel right. This turn, simply receive the person's answer \u2014 a yes, a small correction, or a "leave that one." Don't re-list everything; acknowledge warmly and carry on. The app records their verdict; never say "saved".` : "";
   const confirm = ctx.pendingDraft ? `
 
 AWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the River. If the person's last turn was a clear yes, you may consider it placed (the app commits it \u2014 do not say "saved", just move on warmly). If they corrected it, re-propose ONCE with the correction via the tool. If they declined, let it go without comment.` : "";
@@ -407,7 +412,7 @@ Current chapter: ${chapter.title} (${chapter.era} \xB7 ${chapter.session === "co
 Chapter opening (use this wording when opening the chapter): "${chapter.openingPrompt}"
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(", ") : "present-moment anchor"}.${chapter.extraGuidance ? `
-${chapter.extraGuidance}` : ""}${followUp}${closed}${carry2}${confirm}${photo}${completeness}
+${chapter.extraGuidance}` : ""}${followUp}${closed}${carry2}${confirm}${recap}${photo}${completeness}
 
 Speak as Seth for this turn. If \u2014 and only if \u2014 the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;
@@ -439,7 +444,9 @@ function reviveSnapshot(raw) {
     // Legacy (pre-intro) snapshots revive straight into the walk — never replay
     // the introduction for a session that was already mid-conversation.
     phase: o.phase === "intro" || o.phase === "walk" ? o.phase : "walk",
-    subscriberName: typeof o.subscriberName === "string" ? o.subscriberName : null
+    subscriberName: typeof o.subscriberName === "string" ? o.subscriberName : null,
+    recapPending: Boolean(o.recapPending),
+    nextSessionRecapPending: Boolean(o.nextSessionRecapPending)
   };
 }
 function nextTurn(snapshot) {
@@ -699,6 +706,8 @@ function db() {
 async function createSession() {
   const { OWNER_SUBSCRIBER_ID } = requireSecrets();
   const snapshot = initialStateSnapshot();
+  const prior = await db().from("rot_moments").select("moment_id", { count: "exact", head: true }).eq("subscriber_id", OWNER_SUBSCRIBER_ID).eq("source", "first_thread_voice").eq("status", "committed");
+  if ((prior.count ?? 0) > 0) snapshot.nextSessionRecapPending = true;
   const { data, error } = await db().from("rot_capture_sessions").insert({
     subscriber_id: OWNER_SUBSCRIBER_ID,
     entry_point: "first_thread",
@@ -731,11 +740,12 @@ async function appendExchange(args) {
   return data;
 }
 async function getSession(sessionId) {
-  const { data, error } = await db().from("rot_capture_sessions").select("subscriber_id, state_snapshot").eq("session_id", sessionId).single();
+  const { data, error } = await db().from("rot_capture_sessions").select("subscriber_id, state_snapshot, recap_last_at").eq("session_id", sessionId).single();
   if (error || !data) return null;
   return {
     subscriberId: data.subscriber_id,
-    snapshot: reviveSnapshot(data.state_snapshot)
+    snapshot: reviveSnapshot(data.state_snapshot),
+    recapLastAt: data.recap_last_at ?? null
   };
 }
 async function findResumableSession() {
@@ -787,7 +797,7 @@ import { createHash } from "node:crypto";
 function idempotencyKey(args) {
   return createHash("sha256").update(`${args.subscriberId}|${args.sessionId}|${args.chapter}|${args.turn}`).digest("hex");
 }
-async function commitMomentDraft(args) {
+async function writeAmbientMoment(args) {
   const key = idempotencyKey({
     subscriberId: args.subscriberId,
     sessionId: args.sessionId,
@@ -805,6 +815,8 @@ async function commitMomentDraft(args) {
     title: args.draft.title,
     summary: args.draft.summary,
     moment_type: "milestone",
+    status: "pending_review",
+    // ← ambient write; not committed yet
     visibility: "private",
     // B4: explicit, never the DB default
     companion: "seth",
@@ -817,10 +829,10 @@ async function commitMomentDraft(args) {
     created_by: "seth",
     sync_idempotency_key: key
   }).select("moment_id").single();
-  if (error) throw new Error(`commitMomentDraft failed: ${error.message}`);
+  if (error) throw new Error(`writeAmbientMoment failed: ${error.message}`);
   return { momentId: data.moment_id, merged: false };
 }
-async function commitStoryDraft(args) {
+async function writeAmbientStory(args) {
   const key = idempotencyKey({
     subscriberId: args.subscriberId,
     sessionId: args.sessionId,
@@ -838,6 +850,8 @@ async function commitStoryDraft(args) {
     summary: null,
     narrative_body: args.draft.body,
     moment_type: "story",
+    status: "pending_review",
+    // ← ambient write; not committed yet
     visibility: "private",
     // B4: explicit
     companion: "seth",
@@ -849,8 +863,75 @@ async function commitStoryDraft(args) {
     created_by: "seth",
     sync_idempotency_key: key
   }).select("moment_id").single();
-  if (error) throw new Error(`commitStoryDraft failed: ${error.message}`);
+  if (error) throw new Error(`writeAmbientStory failed: ${error.message}`);
   return { momentId: data.moment_id, merged: false };
+}
+async function getPendingReviewRows(args) {
+  const db2 = getDb();
+  const { data, error } = await db2.from("rot_moments").select("moment_id, title, chapter").eq("subscriber_id", args.subscriberId).eq("source", "first_thread_voice").eq("status", "pending_review").order("created_at", { ascending: true });
+  if (error) throw new Error(`getPendingReviewRows failed: ${error.message}`);
+  return (data ?? []).map((r) => ({
+    momentId: r.moment_id,
+    title: r.title,
+    chapter: r.chapter
+  }));
+}
+async function commitPendingReview(momentIds) {
+  if (momentIds.length === 0) return;
+  const db2 = getDb();
+  const { error } = await db2.from("rot_moments").update({ status: "committed" }).in("moment_id", momentIds);
+  if (error) throw new Error(`commitPendingReview failed: ${error.message}`);
+}
+async function dropPendingReview(momentId) {
+  const db2 = getDb();
+  const { error } = await db2.from("rot_moments").delete().eq("moment_id", momentId).eq("status", "pending_review");
+  if (error) throw new Error(`dropPendingReview failed: ${error.message}`);
+}
+async function markRecapFired(sessionId) {
+  const db2 = getDb();
+  const { error } = await db2.from("rot_capture_sessions").update({ recap_last_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("session_id", sessionId);
+  if (error) throw new Error(`markRecapFired failed: ${error.message}`);
+}
+async function getPriorSessionMoments(args) {
+  const db2 = getDb();
+  const { data, error } = await db2.from("rot_moments").select("moment_id, title, chapter").eq("subscriber_id", args.subscriberId).eq("source", "first_thread_voice").eq("status", "committed").neq("sync_idempotency_key", "").order("created_at", { ascending: false }).limit(args.limit ?? 5);
+  if (error) throw new Error(`getPriorSessionMoments failed: ${error.message}`);
+  return (data ?? []).map((r) => ({
+    momentId: r.moment_id,
+    title: r.title,
+    chapter: r.chapter
+  }));
+}
+function buildNextSessionRecapPrompt(moments) {
+  if (moments.length === 0) return "";
+  const titles = moments.map((m) => m.title);
+  let listStr;
+  if (titles.length === 1) {
+    listStr = titles[0];
+  } else if (titles.length === 2) {
+    listStr = `${titles[0]} and ${titles[1]}`;
+  } else {
+    const last = titles[titles.length - 1];
+    const rest = titles.slice(0, -1).join(", ");
+    listStr = `${rest}, and ${last}`;
+  }
+  return `Last time you told me about ${listStr}. I've held onto those. Shall we carry on?`;
+}
+function buildMidSessionRecapPrompt(rows) {
+  if (rows.length === 0) return "";
+  const titles = rows.map((r) => r.title);
+  let listStr;
+  if (titles.length === 1) {
+    listStr = titles[0];
+  } else if (titles.length === 2) {
+    listStr = `${titles[0]} and ${titles[1]}`;
+  } else {
+    const last = titles[titles.length - 1];
+    const rest = titles.slice(0, -1).join(", ");
+    listStr = `${rest}, and ${last}`;
+  }
+  const bothOrAll = titles.length === 1 ? "that" : titles.length === 2 ? "both of those" : "all of those";
+  return `Before we move on \u2014 you mentioned ${listStr}. I've held onto ${bothOrAll}. Does that feel right?`;
 }
 async function recordClosedTopicEvent(args) {
   const topicTokens = topicFromUtterance(args.utterance, args.payload.phrase);
@@ -868,6 +949,7 @@ async function recordClosedTopicEvent(args) {
 }
 
 // server/src/clm.ts
+var RECAP_INTERVAL_MS = 20 * 60 * 1e3;
 function sseChunk(res, content) {
   const payload = {
     id: `chatcmpl-ft-${Date.now()}`,
@@ -888,6 +970,10 @@ function latestSubscriberUtterance(messages) {
   }
   return "";
 }
+function recapTimeElapsed(recapLastAt) {
+  if (!recapLastAt) return false;
+  return Date.now() - new Date(recapLastAt).getTime() > RECAP_INTERVAL_MS;
+}
 async function handleClmRequest(req, res) {
   const body = req.body;
   const messages = Array.isArray(body?.messages) ? body.messages : [];
@@ -902,11 +988,30 @@ async function handleClmRequest(req, res) {
   let snapshot = session?.snapshot ?? initialStateSnapshot();
   const subscriberId = session?.subscriberId ?? null;
   const utterance = latestSubscriberUtterance(messages);
+  const previousChapterId = snapshot.chapterId;
   snapshot = nextTurn(snapshot);
   const closed = detectClosedDoor(utterance);
   if (closed) {
     snapshot = closeScope(snapshot, closed.phrase);
     snapshot = clearDraft(snapshot);
+    if (snapshot.recapPending && subscriberId && sessionId) {
+      const pendingRows = await safe(
+        () => getPendingReviewRows({ subscriberId, sessionId })
+      ) ?? [];
+      const matchingRow = pendingRows.find(
+        (r) => r.title.toLowerCase().includes(closed.phrase.toLowerCase())
+      );
+      if (matchingRow) {
+        await safe(() => dropPendingReview(matchingRow.momentId));
+        await safe(
+          () => appendExchange({
+            sessionId,
+            role: "system",
+            content: `[recap/reverence] dropped pending_review "${matchingRow.title}" on closed-door signal`
+          })
+        );
+      }
+    }
     if (sessionId && subscriberId) {
       await safe(
         () => appendExchange({
@@ -970,39 +1075,90 @@ async function handleClmRequest(req, res) {
     }
     return;
   }
-  if (snapshot.pendingDraft && subscriberId && sessionId) {
+  if (snapshot.nextSessionRecapPending && subscriberId && sessionId) {
     const verdict = detectConfirmation(utterance);
-    if (verdict === "confirm") {
-      const pending = snapshot.pendingDraft;
-      try {
-        const committed = pending.payload.kind === "moment_draft" ? await commitMomentDraft({
-          subscriberId,
-          sessionId,
-          draft: pending.payload,
-          turn: pending.stagedAtTurn
-        }) : await commitStoryDraft({
-          subscriberId,
-          sessionId,
-          draft: pending.payload,
-          turn: pending.stagedAtTurn,
-          anchorMomentId: snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId
-        });
-        snapshot = recordConfirmedMoment(snapshot, committed.momentId);
-        if (pending.payload.kind === "story_draft" && snapshot.pendingPhoto) {
-          snapshot = clearPhoto(snapshot);
+    if (verdict === "confirm" || snapshot.turn > 1) {
+      snapshot = { ...snapshot, nextSessionRecapPending: false };
+    } else {
+      const priorMoments = await safe(
+        () => getPriorSessionMoments({ subscriberId, currentSessionId: sessionId })
+      ) ?? [];
+      if (priorMoments.length > 0) {
+        const recapText = buildNextSessionRecapPrompt(priorMoments);
+        sseChunk(res, recapText);
+        await safe(
+          () => appendExchange({
+            sessionId,
+            role: "system",
+            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments`
+          })
+        );
+        await safe(() => updateSession(sessionId, { snapshot }));
+        sseDone(res);
+        return;
+      }
+      snapshot = { ...snapshot, nextSessionRecapPending: false };
+    }
+  }
+  if (snapshot.recapPending && subscriberId && sessionId) {
+    const pendingRows = await safe(
+      () => getPendingReviewRows({ subscriberId, sessionId })
+    ) ?? [];
+    const verdict = detectConfirmation(utterance);
+    if (verdict === "confirm" || utterance.trim() === "") {
+      if (pendingRows.length > 0) {
+        const ids = pendingRows.map((r) => r.momentId);
+        await safe(() => commitPendingReview(ids));
+        for (const row of pendingRows) {
+          snapshot = recordConfirmedMoment(snapshot, row.momentId);
         }
         await safe(
           () => appendExchange({
             sessionId,
             role: "system",
-            content: `[river] confirmed ${pending.payload.kind} "${pending.payload.title}" \u2192 moment ${committed.momentId}${committed.merged ? " (idempotent merge)" : ""}`
+            content: `[recap] confirmed ${ids.length} moments: ${pendingRows.map((r) => r.title).join(", ")}`
           })
         );
-      } catch (err) {
-        console.error("[clm] river commit failed:", err);
       }
+      snapshot = { ...snapshot, recapPending: false };
     } else if (verdict === "decline") {
-      snapshot = clearDraft(snapshot);
+      for (const row of pendingRows) {
+        await safe(() => dropPendingReview(row.momentId));
+      }
+      await safe(
+        () => appendExchange({
+          sessionId,
+          role: "system",
+          content: `[recap] subscriber declined batch \u2014 dropped ${pendingRows.length} pending_review rows`
+        })
+      );
+      snapshot = { ...snapshot, recapPending: false };
+    }
+  }
+  if (!snapshot.recapPending && subscriberId && sessionId) {
+    const chapterBoundary = snapshot.chapterId !== previousChapterId;
+    const timeElapsed = recapTimeElapsed(session?.recapLastAt ?? null);
+    if ((chapterBoundary || timeElapsed) && snapshot.turn > 1) {
+      const pendingRows = await safe(
+        () => getPendingReviewRows({ subscriberId, sessionId })
+      ) ?? [];
+      if (pendingRows.length > 0) {
+        const recapText = buildMidSessionRecapPrompt(pendingRows);
+        sseChunk(res, recapText);
+        snapshot = { ...snapshot, recapPending: true };
+        await safe(() => markRecapFired(sessionId));
+        await safe(
+          () => appendExchange({
+            sessionId,
+            role: "system",
+            content: `[recap] ${chapterBoundary ? "chapter boundary" : "20-min elapsed"} \u2014 surfaced ${pendingRows.length} pending_review rows for confirmation`
+          })
+        );
+        await safe(() => updateSession(sessionId, { snapshot }));
+        sseDone(res);
+        return;
+      }
+      if (timeElapsed) await safe(() => markRecapFired(sessionId));
     }
   }
   const systemPrompt = buildSethSystemPrompt({
@@ -1013,7 +1169,8 @@ async function handleClmRequest(req, res) {
     carry: snapshot.carry,
     pendingDraft: snapshot.pendingDraft,
     pendingPhoto: snapshot.pendingPhoto,
-    confirmedInChapter: confirmedInChapter(snapshot)
+    confirmedInChapter: confirmedInChapter(snapshot),
+    recapPending: snapshot.recapPending
   });
   try {
     const result = await generateSethTurn({
@@ -1039,8 +1196,54 @@ async function handleClmRequest(req, res) {
           snapshot = applyChapterComplete(snapshot, result.payload);
           break;
         }
-        case "moment_draft":
+        case "moment_draft": {
+          if (subscriberId && sessionId) {
+            const written = await safe(
+              () => writeAmbientMoment({
+                subscriberId,
+                sessionId,
+                draft: result.payload,
+                turn: snapshot.turn
+              })
+            );
+            if (written) {
+              await safe(
+                () => appendExchange({
+                  sessionId,
+                  role: "system",
+                  content: `[river/ambient] moment_draft "${result.payload.title}" \u2192 pending_review ${written.momentId}`
+                })
+              );
+            }
+          }
+          snapshot = stageDraft(snapshot, result.payload);
+          break;
+        }
         case "story_draft": {
+          if (subscriberId && sessionId) {
+            const anchorId = snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId ?? null;
+            const written = await safe(
+              () => writeAmbientStory({
+                subscriberId,
+                sessionId,
+                draft: result.payload,
+                turn: snapshot.turn,
+                anchorMomentId: anchorId
+              })
+            );
+            if (written && snapshot.pendingPhoto) {
+              snapshot = clearPhoto(snapshot);
+            }
+            if (written) {
+              await safe(
+                () => appendExchange({
+                  sessionId,
+                  role: "system",
+                  content: `[river/ambient] story_draft "${result.payload.title}" \u2192 pending_review ${written.momentId}`
+                })
+              );
+            }
+          }
           snapshot = stageDraft(snapshot, result.payload);
           break;
         }
@@ -1062,9 +1265,10 @@ async function handleClmRequest(req, res) {
 }
 async function safe(fn) {
   try {
-    await fn();
+    return await fn();
   } catch (err) {
     console.error("[clm] persistence error (non-fatal):", err);
+    return null;
   }
 }
 

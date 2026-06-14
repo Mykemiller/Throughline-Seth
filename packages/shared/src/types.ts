@@ -136,8 +136,18 @@ export interface SessionStateSnapshot {
   phase: SessionPhase;
   /** The subscriber's spoken name, captured in the intro (null until given). */
   subscriberName: string | null;
+  /**
+   * True while Seth has surfaced pending_review Moments at a recap and is
+   * awaiting the subscriber's batch verdict (v0.3 Ambient Write + Timed Recap).
+   */
+  recapPending: boolean;
+  /**
+   * Set at session open when the subscriber has committed Moments from a prior
+   * session — Seth speaks a brief next-session recap before resuming the walk.
+   */
+  nextSessionRecapPending: boolean;
   /** Schema version for the snapshot shape itself. */
-  v: 3;
+  v: 4;
 }
 
 /* ── Two-channel structured output (the River-write boundary) ──────────────── */
