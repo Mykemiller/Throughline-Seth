@@ -31,7 +31,16 @@ export function PhotoCapture({
   const [note, setNote] = useState<string | null>(null);
   // A prepared (EXIF-stripped) photo waiting for a Moment to pin to.
   const [pending, setPending] = useState<PreparedPhoto | null>(null);
+  // Local preview of the selected (EXIF-stripped) photo — never the raw original.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const uploadingRef = useRef(false);
+
+  // Revoke the object URL when it changes or the component unmounts.
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   const doUpload = useCallback(
     async (payload: PreparedPhoto) => {
@@ -68,6 +77,11 @@ export function PhotoCapture({
       const bytes = await file.arrayBuffer();
       const exif = parseExif(bytes);
       const stripped = await stripExif(file);
+      // Show the cleaned derivative back to the subscriber straight away.
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(stripped);
+      });
       const payload: PreparedPhoto = {
         sessionId,
         strippedBase64: await blobToBase64(stripped),
@@ -126,6 +140,11 @@ export function PhotoCapture({
         />
         Keep my original file too
       </label>
+      {previewUrl && (
+        <figure className="ft-photo__preview">
+          <img className="ft-photo__preview-img" src={previewUrl} alt="The photograph you just chose" />
+        </figure>
+      )}
       {!hasActiveMoment && !pending && !note && (
         <p className="ft-photo__note">
           You can add a photograph anytime — it attaches to a Moment once you’ve placed one with Seth.
