@@ -319,15 +319,20 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
     ? `\n\nAWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the River. If the person's last turn was a clear yes, you may consider it placed (the app commits it — do not say "saved", just move on warmly). If they corrected it, re-propose ONCE with the correction via the tool. If they declined, let it go without comment.`
     : '';
 
+  const photoWhen = ctx.pendingPhoto?.whenText
+    ? ` It looks like it might be from ${ctx.pendingPhoto.whenText}` +
+      (ctx.pendingPhoto.whereText ? `, perhaps near ${ctx.pendingPhoto.whereText}` : '') +
+      ` — offer any such guess gently, as a possibility, never as established fact.`
+    : '';
+
   const photo = ctx.pendingPhoto
-    ? `\n\nA PHOTOGRAPH was just added to the Moment you're discussing${
-        ctx.pendingPhoto.whenText ? ` (it appears to be from ${ctx.pendingPhoto.whenText}` +
-        (ctx.pendingPhoto.whereText ? `, near ${ctx.pendingPhoto.whereText}` : '') + ' — propose, never assert)' : ''
-      }.${
-        ctx.pendingPhoto.description
-          ? ` Looking at it, you can see: ${ctx.pendingPhoto.description} This is only what is visible in the image — you may gently reference one detail you notice to show you're looking with them, but NEVER name or identify anyone, NEVER assert who they are or their story. Let them tell you.`
-          : ''
-      } Invite them to tell you about it — who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.`
+    ? `\n\nA PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. THIS turn, before you move the conversation forward or invite them to narrate, show them you're truly looking — in your own warm, spoken words, do two things in order:\n` +
+      `  1. Acknowledge plainly that the picture has come through and that you can see it.\n` +
+      (ctx.pendingPhoto.description
+        ? `  2. Tell them what you can make out in it: ${ctx.pendingPhoto.description} Describe ONLY this — what is literally visible — and propose rather than assert ("this looks like it might be…", never stated as fact).${photoWhen}\n`
+        : `  2. You couldn't make out its details this time, so simply acknowledge the photograph warmly and do not describe anything you cannot see — invent nothing.${photoWhen}\n`) +
+      `Hard limits while you do this: NEVER name or identify anyone in it, NEVER guess relationships, NEVER invent a backstory. The people and the story in the picture are theirs to tell, not yours to supply.\n` +
+      `Then, and only then, invite them to tell you about it — who is in it, where it was, what was happening. When they have told you, emit a story_draft via the tool (their words, grounded) and reflect it back for confirmation.`
     : '';
 
   const completeness =
