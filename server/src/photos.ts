@@ -14,6 +14,7 @@
  */
 import type { Request, Response } from 'express';
 import { clearDraft, pinPhoto } from '@throughline/shared';
+import { describePhotograph } from './claude.js';
 import { getSession, updateSession, uploadAndPinPhoto } from './supabase.js';
 
 export async function handlePhotoUpload(req: Request, res: Response): Promise<void> {
@@ -49,6 +50,11 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
       retainOriginal: retainOriginal === true,
     });
 
+    // Vision "review" of the clean derivative — grounded, best-effort, so Seth
+    // can gently reference what he can see. A failure here must never block the
+    // pin, so describePhotograph swallows its own errors and returns undefined.
+    const description = await describePhotograph({ strippedJpegBase64: strippedBase64 });
+
     // Pin in the snapshot → Seth invites commentary next turn. Any stale
     // pending draft is cleared so the story confirmation can't cross wires.
     let snapshot = clearDraft(session.snapshot);
@@ -57,6 +63,7 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
       momentId: session.snapshot.activeMomentId,
       whenText: typeof whenText === 'string' && whenText ? whenText : undefined,
       whereText: typeof whereText === 'string' && whereText ? whereText : undefined,
+      description,
     });
     await updateSession(sessionId, { snapshot });
 

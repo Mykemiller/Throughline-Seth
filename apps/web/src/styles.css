@@ -212,6 +212,21 @@ code {
   color: var(--tl-parchment-dim);
 }
 
+.ft-photo__preview {
+  width: 100%;
+  margin: var(--tl-space-2) 0 0;
+}
+
+.ft-photo__preview-img {
+  display: block;
+  max-width: 320px;
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(30, 42, 58, 0.18);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
 .ft-resume-note {
   font-family: var(--tl-font-display);
   font-style: italic;
