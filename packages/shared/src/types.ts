@@ -144,7 +144,12 @@ export interface SessionStateSnapshot {
   pendingDraft: PendingDraft | null;
   /** Photo pinned and awaiting the subscriber's spoken commentary. */
   pendingPhoto: PendingPhoto | null;
-  /** moment_id of the most recently confirmed Moment (photo pin target). */
+  /**
+   * moment_id of the Moment in focus — the photo pin target and story anchor.
+   * Set as soon as a Moment is written ambiently (pending_review), so a photo
+   * can attach without waiting for recap confirmation; also set on recap
+   * confirmation. Null until the first Moment of the session exists.
+   */
   activeMomentId: string | null;
   /** Count of confirmed Moments per chapter (chapter completeness rule). */
   confirmedMoments: Partial<Record<ChapterId, number>>;

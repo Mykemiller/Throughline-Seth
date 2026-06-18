@@ -276,6 +276,21 @@ export function clearDraft(snapshot: SessionStateSnapshot): SessionStateSnapshot
   return { ...snapshot, pendingDraft: null };
 }
 
+/**
+ * Make `momentId` the Moment in focus — the pin target for a photo and the
+ * anchor for a story — WITHOUT counting it toward chapter completeness. Used
+ * when an ambient (pending_review) Moment is written: the photo flow needs a
+ * live pin target immediately, but completeness still requires the subscriber's
+ * recap confirmation (recordConfirmedMoment). Idempotent on the same id.
+ */
+export function setActiveMoment(
+  snapshot: SessionStateSnapshot,
+  momentId: string,
+): SessionStateSnapshot {
+  if (snapshot.activeMomentId === momentId) return snapshot;
+  return { ...snapshot, activeMomentId: momentId };
+}
+
 /** Record a confirmed Moment write-back (the runtime did the DB write). */
 export function recordConfirmedMoment(
   snapshot: SessionStateSnapshot,

@@ -50,6 +50,7 @@ import {
   detectConfirmation,
   initialStateSnapshot,
   nextTurn,
+  setActiveMoment,
   spendFollowUp,
   stageDraft,
   recordConfirmedMoment,
@@ -381,11 +382,16 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
               }),
             );
             if (written) {
+              // Make the ambient Moment the pin target NOW so a photo can
+              // attach immediately (it doesn't wait for recap confirmation).
+              // This does NOT count toward chapter completeness — that still
+              // requires the subscriber's recap confirmation.
+              snapshot = setActiveMoment(snapshot, written.momentId);
               await safe(() =>
                 appendExchange({
                   sessionId,
                   role: 'system',
-                  content: `[river/ambient] moment_draft "${(result.payload as any).title}" → pending_review ${written.momentId}`,
+                  content: `[river/ambient] moment_draft "${(result.payload as any).title}" → pending_review ${written.momentId} (active pin target)`,
                 }),
               );
             }

@@ -10,12 +10,14 @@ import {
   applyIntroComplete,
   canAdvance,
   closeScope,
+  confirmedInChapter,
   detectConfirmation,
   isFinalChapter,
   isIntro,
   jumpToChapter,
   recordConfirmedMoment,
   reviveSnapshot,
+  setActiveMoment,
   silenceToleranceMs,
   stageDraft,
   touchesClosedScope,
@@ -121,6 +123,25 @@ test('reviveSnapshot upgrades a legacy v1 snapshot without losing closures', () 
   assert.equal(revived.photosSinceRecap, 0);
   assert.equal(revived.lastActivityAt, null);
   assert.deepEqual(revived.namedIdentities, []);
+});
+
+test('setActiveMoment sets the pin target without counting chapter completeness', () => {
+  const snap = initialStateSnapshot();
+  assert.equal(snap.activeMomentId, null);
+  assert.equal(canAdvance(snap), false);
+
+  const pinned = setActiveMoment(snap, 'm-ambient-1');
+  assert.equal(pinned.activeMomentId, 'm-ambient-1'); // photo can pin now
+  assert.equal(confirmedInChapter(pinned), 0); // but the chapter is NOT complete
+  assert.equal(canAdvance(pinned), false); // completeness still needs recap confirm
+
+  // Idempotent on the same id.
+  assert.equal(setActiveMoment(pinned, 'm-ambient-1'), pinned);
+
+  // recordConfirmedMoment is what actually advances completeness.
+  const confirmed = recordConfirmedMoment(pinned, 'm-ambient-1');
+  assert.equal(confirmed.activeMomentId, 'm-ambient-1');
+  assert.equal(confirmedInChapter(confirmed), 1);
 });
 
 test('reviveSnapshot preserves v5 photo-series fields on round-trip', () => {

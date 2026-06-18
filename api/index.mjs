@@ -537,6 +537,10 @@ function stageDraft(snapshot, payload) {
 function clearDraft(snapshot) {
   return { ...snapshot, pendingDraft: null };
 }
+function setActiveMoment(snapshot, momentId) {
+  if (snapshot.activeMomentId === momentId) return snapshot;
+  return { ...snapshot, activeMomentId: momentId };
+}
 function recordConfirmedMoment(snapshot, momentId) {
   const count = (snapshot.confirmedMoments[snapshot.chapterId] ?? 0) + 1;
   return {
@@ -1258,11 +1262,12 @@ async function handleClmRequest(req, res) {
               })
             );
             if (written) {
+              snapshot = setActiveMoment(snapshot, written.momentId);
               await safe(
                 () => appendExchange({
                   sessionId,
                   role: "system",
-                  content: `[river/ambient] moment_draft "${result.payload.title}" \u2192 pending_review ${written.momentId}`
+                  content: `[river/ambient] moment_draft "${result.payload.title}" \u2192 pending_review ${written.momentId} (active pin target)`
                 })
               );
             }
