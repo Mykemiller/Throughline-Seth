@@ -8,7 +8,7 @@
  * short. Model defaults to claude-opus-4-8 (see env.CLAUDE_MODEL).
  */
 import Anthropic from '@anthropic-ai/sdk';
-import type { ChapterId, ClmMessage, FirstThreadPayload } from '@throughline/shared';
+import type { ChapterId, ClmMessage, FirstThreadPayload, VisionConfidence } from '@throughline/shared';
 import { CLAUDE_MODEL, requireSecrets } from './env.js';
 
 let anthropic: Anthropic | null = null;
@@ -120,31 +120,82 @@ export async function generateSethTurn(args: {
 }
 
 /**
- * Vision "review" of a just-added photograph (THOUG-132). Produces a SHORT,
- * literal description of what is *visibly* in the EXIF-stripped derivative so
- * Seth can gently reference it — never to assert identities or invent facts
- * about the person's life (No-confabulation rule). The description is an
- * observation of the image artifact only; Seth still proposes, never asserts.
- *
+ * Structured vision "review" of a just-added photograph (THOUG-132). Alongside
+ * a SHORT literal description, it returns a confidence/validity assessment so
+ * the scaffold can gate Beat 0a deterministically (a screenshot, document, or
+ * blurry file routes Seth to "did you mean a different picture?" instead of
+ * confabulating a memory).
+ */
+export interface PhotographReview {
+  /** One or two plain sentences of ONLY what is literally visible. */
+  description?: string;
+  /** True if this reads as a real family/personal photo (vs screenshot/doc). */
+  isLikelyFamilyPhotograph: boolean;
+  /** How clearly the image could be read (low → Beat 0a graceful handling). */
+  confidence: VisionConfidence;
+}
+
+/**
+ * Forced-tool schema for the vision pass. Forcing the tool guarantees a
+ * structured verdict instead of free text we'd have to parse.
+ */
+const PHOTO_REVIEW_TOOL: Anthropic.Tool = {
+  name: 'photograph_review',
+  description:
+    'Report a grounded, literal review of the image artifact only — never an ' +
+    'identification, relationship, or backstory.',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      isLikelyFamilyPhotograph: {
+        type: 'boolean',
+        description:
+          'True if this reads as a real family/personal photograph; false for a ' +
+          'screenshot, document, meme, chart, or otherwise unrelated graphic.',
+      },
+      confidence: {
+        type: 'string',
+        enum: ['high', 'medium', 'low'],
+        description:
+          'How clearly you can make the image out. Use "low" if it is blurry, ' +
+          'corrupted, or too ambiguous to describe.',
+      },
+      description: {
+        type: 'string',
+        description:
+          'One or two plain sentences of ONLY what is literally visible — ' +
+          'setting, number of people, apparent era from clothing/photo style, ' +
+          'objects, mood. No names, no relationships, no backstory. Omit if you ' +
+          'cannot make the image out.',
+      },
+    },
+    required: ['isLikelyFamilyPhotograph', 'confidence'],
+  },
+};
+
+/**
  * Best-effort: returns undefined on any failure so a vision hiccup never blocks
  * the photo pin or the conversation.
  */
 export async function describePhotograph(args: {
   strippedJpegBase64: string;
   signal?: AbortSignal;
-}): Promise<string | undefined> {
+}): Promise<PhotographReview | undefined> {
   try {
     const message = await client().messages.create(
       {
         model: CLAUDE_MODEL,
-        max_tokens: 160,
+        max_tokens: 200,
         system:
           'You help a warm family-history companion notice an old photograph. ' +
-          'Describe ONLY what is literally visible in the image in one or two plain ' +
-          'sentences — setting, number of people, apparent era from clothing/photo style, ' +
-          'objects, mood. Do NOT name or identify anyone, do NOT guess who they are or ' +
-          'their relationships, and do NOT invent any backstory. If something is unclear, ' +
-          'say so plainly. Keep it short and neutral.',
+          'Assess whether the image is a real family/personal photograph and how ' +
+          'clearly you can read it, then describe ONLY what is literally visible. ' +
+          'Do NOT name or identify anyone, do NOT guess who they are or their ' +
+          'relationships, and do NOT invent any backstory. Report via the ' +
+          'photograph_review tool.',
+        tools: [PHOTO_REVIEW_TOOL],
+        tool_choice: { type: 'tool', name: PHOTO_REVIEW_TOOL.name },
         messages: [
           {
             role: 'user',
@@ -157,19 +208,28 @@ export async function describePhotograph(args: {
                   data: args.strippedJpegBase64,
                 },
               },
-              { type: 'text', text: 'What is visibly in this photograph?' },
+              { type: 'text', text: 'Review this photograph.' },
             ],
           },
         ],
       },
       { signal: args.signal },
     );
-    const text = message.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join(' ')
-      .trim();
-    return text || undefined;
+    const tool = message.content.find(
+      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === PHOTO_REVIEW_TOOL.name,
+    );
+    if (!tool) return undefined;
+    const o = tool.input as Record<string, unknown>;
+    const confidence: VisionConfidence =
+      o.confidence === 'high' || o.confidence === 'medium' || o.confidence === 'low'
+        ? o.confidence
+        : 'low';
+    const description = typeof o.description === 'string' ? o.description.trim() : undefined;
+    return {
+      isLikelyFamilyPhotograph: o.isLikelyFamilyPhotograph === true,
+      confidence,
+      description: description || undefined,
+    };
   } catch (err) {
     // Best-effort: never block the pin. But surface WHY in a single structured
     // line so a swallowed failure is diagnosable from the platform logs — the

@@ -340,8 +340,20 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
       `. Treat this as a soft hint only. If the image itself looks like an older print or scan (black-and-white, faded, period clothing, an old border) while that file date is recent, the date almost certainly records when it was DIGITIZED, not when the moment happened — do NOT propose it as the memory's date; gently note the gap and ask when the moment itself took place. Otherwise you may offer the date as a question ("the file says maybe ${ctx.pendingPhoto.whenText} — does that land anywhere near the truth?"), never as established fact.`
     : '';
 
-  const photo = ctx.pendingPhoto
-    ? `\n\nA PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. Walk it through the photo-series beats this turn, in your own warm, spoken words:\n` +
+  // Beat 0a, deterministic: the vision pass flagged this as not-a-family-photo
+  // or too unclear to read. Route to the graceful non-photo acknowledgment
+  // instead of describing or asking a memory question. (Both fields undefined =
+  // vision skipped/failed → fall through to the normal beats and just
+  // acknowledge warmly without inventing a description.)
+  const photoUnsure =
+    ctx.pendingPhoto != null &&
+    (ctx.pendingPhoto.isLikelyPhoto === false || ctx.pendingPhoto.visionConfidence === 'low');
+
+  const photo = !ctx.pendingPhoto
+    ? ''
+    : photoUnsure
+      ? `\n\nAn image was just added, but it did NOT read as a clear family photograph — it may be a screenshot, a document, a meme, or it was too blurry or unclear to make out. Do NOT invent a description or a memory around it. THIS turn, in your own warm spoken words: gently name that you're having a little trouble seeing it clearly, and ask if they meant to share a different picture (e.g. "Hmm, I'm having trouble making this one out — it looks like it might be a screenshot. Did you mean to share a different picture with me?"). Don't ask a memory question about it, and describe nothing you can't see. If they say to skip it, set it aside warmly and move on without pressure.`
+      : `\n\nA PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. Walk it through the photo-series beats this turn, in your own warm, spoken words:\n` +
       (ctx.pendingPhoto.description
         ? `  BEAT 0 — VALIDITY: here is a grounded note on what is visible — ${ctx.pendingPhoto.description} If this reads as a real family photograph, continue. If it instead looks like a screenshot, a document, a meme, or is too blurry or unclear to make out, do NOT invent a memory around it — warmly name that you're having a little trouble seeing it and ask if they meant to share a different picture, then stop there for this turn.\n`
         : `  BEAT 0 — VALIDITY: you could not make out this image's details this time. Invent nothing. Acknowledge the photograph warmly, and if it may not have come through cleanly, gently ask whether they'd like to try again or show a different one.\n`) +
@@ -350,8 +362,7 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
       `Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.\n` +
       `INTRA-SESSION IDENTITY: the "never name people" rule guards against you INVENTING an identity — it is not amnesia. If earlier in THIS conversation they already named someone ("that's my dad, Arthur"), you may gently reuse that name when the same person plausibly reappears ("is that Arthur again?") — offered as an observation open to correction, never as a hard claim, and never extended to anyone they haven't named themselves.\n` +
       `BEAT 3 — RECEIVE AMBIENTLY: when they tell you about it, take whatever they give — a story, a single word, or nothing — and let it be enough. Mirror lightly, in their words. Do NOT echo the same way every photo: rotate your move and never repeat it back-to-back — VALIDATE (lightly mirror their words) / SYNTHESIZE (tie this photo to an earlier one from this session) / ACKNOWLEDGE & CLEAR (let a phrase breathe, no echo, then the next question). When something concrete is worth keeping, emit a story_draft via the tool (their words, grounded) — never narrate the save.\n` +
-      `If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.`
-    : '';
+      `If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.`;
 
   const completeness =
     ctx.confirmedInChapter > 0 && ctx.followUpSpent

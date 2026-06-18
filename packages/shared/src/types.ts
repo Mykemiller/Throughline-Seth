@@ -110,6 +110,9 @@ export interface NamedIdentity {
   firstSeenTurn: number;
 }
 
+/** How clearly the vision pass could read the image (Beat 0a gating). */
+export type VisionConfidence = 'high' | 'medium' | 'low';
+
 /** A photo pinned mid-session, awaiting spoken commentary (E13-05/06). */
 export interface PendingPhoto {
   assetId: string;
@@ -124,6 +127,15 @@ export interface PendingPhoto {
    * never asserts.
    */
   description?: string;
+  /**
+   * Vision-confidence gate (Beat 0a). `isLikelyPhoto === false` or
+   * `visionConfidence === 'low'` routes Seth to the graceful non-photo
+   * acknowledgment ("did you mean a different picture?") instead of describing.
+   * Both are undefined when the vision pass was skipped or failed — in that
+   * case Seth acknowledges the photo warmly without inventing a description.
+   */
+  isLikelyPhoto?: boolean;
+  visionConfidence?: VisionConfidence;
 }
 
 /**

@@ -404,7 +404,10 @@ You have just gently recapped the Moments you've been holding onto and asked whe
 
 AWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the River. If the person's last turn was a clear yes, you may consider it placed (the app commits it \u2014 do not say "saved", just move on warmly). If they corrected it, re-propose ONCE with the correction via the tool. If they declined, let it go without comment.` : "";
   const photoWhenHint = ctx.pendingPhoto?.whenText ? ` The photo's file metadata suggests a date of "${ctx.pendingPhoto.whenText}"` + (ctx.pendingPhoto.whereText ? ` and a place near "${ctx.pendingPhoto.whereText}"` : "") + `. Treat this as a soft hint only. If the image itself looks like an older print or scan (black-and-white, faded, period clothing, an old border) while that file date is recent, the date almost certainly records when it was DIGITIZED, not when the moment happened \u2014 do NOT propose it as the memory's date; gently note the gap and ask when the moment itself took place. Otherwise you may offer the date as a question ("the file says maybe ${ctx.pendingPhoto.whenText} \u2014 does that land anywhere near the truth?"), never as established fact.` : "";
-  const photo = ctx.pendingPhoto ? `
+  const photoUnsure = ctx.pendingPhoto != null && (ctx.pendingPhoto.isLikelyPhoto === false || ctx.pendingPhoto.visionConfidence === "low");
+  const photo = !ctx.pendingPhoto ? "" : photoUnsure ? `
+
+An image was just added, but it did NOT read as a clear family photograph \u2014 it may be a screenshot, a document, a meme, or it was too blurry or unclear to make out. Do NOT invent a description or a memory around it. THIS turn, in your own warm spoken words: gently name that you're having a little trouble seeing it clearly, and ask if they meant to share a different picture (e.g. "Hmm, I'm having trouble making this one out \u2014 it looks like it might be a screenshot. Did you mean to share a different picture with me?"). Don't ask a memory question about it, and describe nothing you can't see. If they say to skip it, set it aside warmly and move on without pressure.` : `
 
 A PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. Walk it through the photo-series beats this turn, in your own warm, spoken words:
 ` + (ctx.pendingPhoto.description ? `  BEAT 0 \u2014 VALIDITY: here is a grounded note on what is visible \u2014 ${ctx.pendingPhoto.description} If this reads as a real family photograph, continue. If it instead looks like a screenshot, a document, a meme, or is too blurry or unclear to make out, do NOT invent a memory around it \u2014 warmly name that you're having a little trouble seeing it and ask if they meant to share a different picture, then stop there for this turn.
@@ -414,7 +417,7 @@ A PHOTOGRAPH was just added to the Moment you're discussing, and you can see it 
 Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.
 INTRA-SESSION IDENTITY: the "never name people" rule guards against you INVENTING an identity \u2014 it is not amnesia. If earlier in THIS conversation they already named someone ("that's my dad, Arthur"), you may gently reuse that name when the same person plausibly reappears ("is that Arthur again?") \u2014 offered as an observation open to correction, never as a hard claim, and never extended to anyone they haven't named themselves.
 BEAT 3 \u2014 RECEIVE AMBIENTLY: when they tell you about it, take whatever they give \u2014 a story, a single word, or nothing \u2014 and let it be enough. Mirror lightly, in their words. Do NOT echo the same way every photo: rotate your move and never repeat it back-to-back \u2014 VALIDATE (lightly mirror their words) / SYNTHESIZE (tie this photo to an earlier one from this session) / ACKNOWLEDGE & CLEAR (let a phrase breathe, no echo, then the next question). When something concrete is worth keeping, emit a story_draft via the tool (their words, grounded) \u2014 never narrate the save.
-If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.` : "";
+If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.`;
   const completeness = ctx.confirmedInChapter > 0 && ctx.followUpSpent ? `
 
 This chapter has a confirmed Moment. When it feels complete, emit chapter_complete via the tool (with a carryDetail) and speak the transition into the next chapter, carrying: ${chapter.transitionCarry}.` : `
@@ -572,9 +575,12 @@ import "dotenv/config";
 function bool(v) {
   return v === "true" || v === "1" || v === "yes";
 }
+function sanitize(v) {
+  return (v ?? "").trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").trim();
+}
 var FIRST_THREAD_VOICE = bool(process.env.FIRST_THREAD_VOICE);
 var PORT = Number(process.env.PORT ?? 8787);
-var CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? "claude-opus-4-8";
+var CLAUDE_MODEL = sanitize(process.env.CLAUDE_MODEL) || "claude-opus-4-8";
 var REQUIRED_WHEN_ENABLED = [
   "HUME_API_KEY",
   "HUME_SECRET_KEY",
@@ -585,20 +591,20 @@ var REQUIRED_WHEN_ENABLED = [
   "OWNER_SUBSCRIBER_ID"
 ];
 function requireSecrets() {
-  const missing = REQUIRED_WHEN_ENABLED.filter((k) => !process.env[k] || process.env[k].trim() === "");
+  const missing = REQUIRED_WHEN_ENABLED.filter((k) => sanitize(process.env[k]) === "");
   if (missing.length > 0) {
     throw new Error(
       `first_thread_voice is enabled but required environment variables are missing: ${missing.join(", ")}. Set them (see .env.example) \u2014 secrets are never hardcoded.`
     );
   }
   return {
-    HUME_API_KEY: process.env.HUME_API_KEY,
-    HUME_SECRET_KEY: process.env.HUME_SECRET_KEY,
-    HUME_CONFIG_ID: process.env.HUME_CONFIG_ID,
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-    SUPABASE_URL: process.env.SUPABASE_URL,
-    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
-    OWNER_SUBSCRIBER_ID: process.env.OWNER_SUBSCRIBER_ID
+    HUME_API_KEY: sanitize(process.env.HUME_API_KEY),
+    HUME_SECRET_KEY: sanitize(process.env.HUME_SECRET_KEY),
+    HUME_CONFIG_ID: sanitize(process.env.HUME_CONFIG_ID),
+    ANTHROPIC_API_KEY: sanitize(process.env.ANTHROPIC_API_KEY),
+    SUPABASE_URL: sanitize(process.env.SUPABASE_URL),
+    SUPABASE_SERVICE_ROLE_KEY: sanitize(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    OWNER_SUBSCRIBER_ID: sanitize(process.env.OWNER_SUBSCRIBER_ID)
   };
 }
 
@@ -676,13 +682,39 @@ async function generateSethTurn(args) {
   }
   return { spokenText, payload, stopReason: final.stop_reason };
 }
+var PHOTO_REVIEW_TOOL = {
+  name: "photograph_review",
+  description: "Report a grounded, literal review of the image artifact only \u2014 never an identification, relationship, or backstory.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      isLikelyFamilyPhotograph: {
+        type: "boolean",
+        description: "True if this reads as a real family/personal photograph; false for a screenshot, document, meme, chart, or otherwise unrelated graphic."
+      },
+      confidence: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+        description: 'How clearly you can make the image out. Use "low" if it is blurry, corrupted, or too ambiguous to describe.'
+      },
+      description: {
+        type: "string",
+        description: "One or two plain sentences of ONLY what is literally visible \u2014 setting, number of people, apparent era from clothing/photo style, objects, mood. No names, no relationships, no backstory. Omit if you cannot make the image out."
+      }
+    },
+    required: ["isLikelyFamilyPhotograph", "confidence"]
+  }
+};
 async function describePhotograph(args) {
   try {
     const message = await client().messages.create(
       {
         model: CLAUDE_MODEL,
-        max_tokens: 160,
-        system: "You help a warm family-history companion notice an old photograph. Describe ONLY what is literally visible in the image in one or two plain sentences \u2014 setting, number of people, apparent era from clothing/photo style, objects, mood. Do NOT name or identify anyone, do NOT guess who they are or their relationships, and do NOT invent any backstory. If something is unclear, say so plainly. Keep it short and neutral.",
+        max_tokens: 200,
+        system: "You help a warm family-history companion notice an old photograph. Assess whether the image is a real family/personal photograph and how clearly you can read it, then describe ONLY what is literally visible. Do NOT name or identify anyone, do NOT guess who they are or their relationships, and do NOT invent any backstory. Report via the photograph_review tool.",
+        tools: [PHOTO_REVIEW_TOOL],
+        tool_choice: { type: "tool", name: PHOTO_REVIEW_TOOL.name },
         messages: [
           {
             role: "user",
@@ -695,17 +727,39 @@ async function describePhotograph(args) {
                   data: args.strippedJpegBase64
                 }
               },
-              { type: "text", text: "What is visibly in this photograph?" }
+              { type: "text", text: "Review this photograph." }
             ]
           }
         ]
       },
       { signal: args.signal }
     );
-    const text = message.content.filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
-    return text || void 0;
+    const tool = message.content.find(
+      (b) => b.type === "tool_use" && b.name === PHOTO_REVIEW_TOOL.name
+    );
+    if (!tool) return void 0;
+    const o = tool.input;
+    const confidence = o.confidence === "high" || o.confidence === "medium" || o.confidence === "low" ? o.confidence : "low";
+    const description = typeof o.description === "string" ? o.description.trim() : void 0;
+    return {
+      isLikelyFamilyPhotograph: o.isLikelyFamilyPhotograph === true,
+      confidence,
+      description: description || void 0
+    };
   } catch (err) {
-    console.error("[claude] photo description failed (non-fatal):", err);
+    const e = err;
+    console.error(
+      "[claude] photo description failed (non-fatal):",
+      JSON.stringify({
+        model: CLAUDE_MODEL,
+        imageBase64Bytes: args.strippedJpegBase64?.length ?? 0,
+        name: e?.name,
+        status: e?.status ?? null,
+        apiErrorType: e?.error?.error?.type ?? e?.error?.type ?? null,
+        requestId: e?.request_id ?? e?.requestID ?? null,
+        message: e?.message
+      })
+    );
     return void 0;
   }
 }
@@ -1364,14 +1418,16 @@ async function handlePhotoUpload(req, res) {
       original,
       retainOriginal: retainOriginal === true
     });
-    const description = await describePhotograph({ strippedJpegBase64: strippedBase64 });
+    const review = await describePhotograph({ strippedJpegBase64: strippedBase64 });
     let snapshot = clearDraft(session.snapshot);
     snapshot = pinPhoto(snapshot, {
       assetId,
       momentId: session.snapshot.activeMomentId,
       whenText: typeof whenText === "string" && whenText ? whenText : void 0,
       whereText: typeof whereText === "string" && whereText ? whereText : void 0,
-      description
+      description: review?.description,
+      isLikelyPhoto: review?.isLikelyFamilyPhotograph,
+      visionConfidence: review?.confidence
     });
     await updateSession(sessionId, { snapshot });
     res.json({ assetId, momentId: session.snapshot.activeMomentId });

@@ -84,6 +84,39 @@ test('recent file date on a vintage-looking photo is framed as a scan date', () 
   assert.match(p, /never as established fact/);
 });
 
+test('low vision confidence routes to the graceful non-photo acknowledgment', () => {
+  const p = buildSethSystemPrompt(
+    baseCtx({ pendingPhoto: photo({ description: 'unclear', visionConfidence: 'low' }) }),
+  );
+  assert.match(p, /did NOT read as a clear family photograph/);
+  assert.match(p, /Did you mean to share a different picture/);
+  // It must NOT run the describe/elicit beats on an unreadable image.
+  assert.ok(!p.includes('BEAT 2 — ELICIT ONE DETAIL'));
+});
+
+test('not-a-family-photo routes to the graceful non-photo acknowledgment', () => {
+  const p = buildSethSystemPrompt(
+    baseCtx({ pendingPhoto: photo({ description: 'a spreadsheet', isLikelyPhoto: false, visionConfidence: 'high' }) }),
+  );
+  assert.match(p, /did NOT read as a clear family photograph/);
+  assert.ok(!p.includes('BEAT 2 — ELICIT ONE DETAIL'));
+});
+
+test('a confident family photo still runs the full beats', () => {
+  const p = buildSethSystemPrompt(
+    baseCtx({ pendingPhoto: photo({ description: 'two people on a porch', isLikelyPhoto: true, visionConfidence: 'high' }) }),
+  );
+  assert.match(p, /BEAT 2 — ELICIT ONE DETAIL \(MANDATORY for every photo\)/);
+  assert.ok(!p.includes('did NOT read as a clear family photograph'));
+});
+
+test('vision skipped/failed (no verdict) falls through to the normal beats', () => {
+  const p = buildSethSystemPrompt(baseCtx({ pendingPhoto: photo() }));
+  // No isLikelyPhoto/visionConfidence → not treated as a non-photo.
+  assert.ok(!p.includes('did NOT read as a clear family photograph'));
+  assert.match(p, /BEAT 2 — ELICIT ONE DETAIL/);
+});
+
 test('reverence preamble distinguishes operational timeout from emotional decline', () => {
   const p = buildSethSystemPrompt(baseCtx());
   assert.match(p, /Operational silence is NOT an emotional decline/);
