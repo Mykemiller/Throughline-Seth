@@ -341,6 +341,54 @@ export function clearPhoto(snapshot: SessionStateSnapshot): SessionStateSnapshot
   return { ...snapshot, pendingPhoto: null };
 }
 
+/* ── Recap triggers: soft photo cap + idle/operational return (item B) ─────── */
+
+/** Soft cap on photos gathered before Seth suggests a recap pause (skill §5.1). */
+export const PHOTO_SOFT_CAP = 5;
+
+/** Idle gap that marks an operational return (app backgrounded / stepped away). */
+export const IDLE_RETURN_MS = 4 * 60 * 60 * 1000; // ~4 hours
+
+/** Count a freshly pinned photo toward the soft-cap recap trigger. */
+export function countPhotoForRecap(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  return { ...snapshot, photosSinceRecap: snapshot.photosSinceRecap + 1 };
+}
+
+/** Reset the photo counter — called when a recap fires. */
+export function resetPhotosSinceRecap(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  if (snapshot.photosSinceRecap === 0) return snapshot;
+  return { ...snapshot, photosSinceRecap: 0 };
+}
+
+/** True once enough photos have gathered to suggest a natural recap pause. */
+export function hitPhotoSoftCap(snapshot: SessionStateSnapshot): boolean {
+  return snapshot.photosSinceRecap >= PHOTO_SOFT_CAP;
+}
+
+/** Stamp the last-activity time (caller passes the ISO string; keeps this pure). */
+export function markActivity(
+  snapshot: SessionStateSnapshot,
+  atIso: string,
+): SessionStateSnapshot {
+  return { ...snapshot, lastActivityAt: atIso };
+}
+
+/**
+ * Operational return: the session resumed after a long inactivity gap (app
+ * backgrounded, dropped, stepped away). This is NOT a closed door — Seth offers
+ * a gentle re-entry nudge. `nowMs` is passed in so the function stays pure.
+ */
+export function isOperationalReturn(
+  snapshot: SessionStateSnapshot,
+  nowMs: number,
+  thresholdMs: number = IDLE_RETURN_MS,
+): boolean {
+  if (!snapshot.lastActivityAt) return false;
+  const last = new Date(snapshot.lastActivityAt).getTime();
+  if (Number.isNaN(last)) return false;
+  return nowMs - last > thresholdMs;
+}
+
 /* ── Spoken confirmation detection (E13-04) ───────────────────────────────── */
 
 const AFFIRM = /\b(yes|yeah|yep|yes it does|that's right|thats right|that's it|sounds right|feels right|exactly|correct|perfect|it does|put it on|place it|save it|keep it)\b/i;

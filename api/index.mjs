@@ -397,6 +397,9 @@ Carried details to weave into your transition naturally: ${JSON.stringify(ctx.ca
 You have already used this chapter's one bounded follow-up. Return to the spine and move the chapter toward its Moment.` : `
 
 You may ask at most ONE bounded follow-up in this chapter. ${chapter.followUpGuidance}`;
+  const reentry = ctx.operationalReturn ? `
+
+The conversation just resumed after a long pause \u2014 the app was backgrounded or they stepped away. This is an OPERATIONAL return, NOT a closed door: do not treat the gap as anything tender. Open THIS turn with a single gentle, open-ended re-entry nudge that picks the thread back up where you left off ("Welcome back \u2014 no rush at all; we were just looking at that picture when we paused."), then let them lead.` : "";
   const recap = ctx.recapPending ? `
 
 You have just gently recapped the Moments you've been holding onto and asked whether they feel right. This turn, simply receive the person's answer \u2014 a yes, a small correction, or a "leave that one." Don't re-list everything; acknowledge warmly and carry on. The app records their verdict; never say "saved".` : "";
@@ -433,7 +436,7 @@ Current chapter: ${chapter.title} (${chapter.era} \xB7 ${chapter.session === "co
 Chapter opening (use this wording when opening the chapter): "${chapter.openingPrompt}"
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(", ") : "present-moment anchor"}.${chapter.extraGuidance ? `
-${chapter.extraGuidance}` : ""}${followUp}${closed}${carry2}${confirm}${recap}${photo}${completeness}
+${chapter.extraGuidance}` : ""}${reentry}${followUp}${closed}${carry2}${confirm}${recap}${photo}${completeness}
 
 Speak as Seth for this turn. If \u2014 and only if \u2014 the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;
@@ -564,6 +567,27 @@ function enqueuePhoto(snapshot, photo) {
 function dequeuePhoto(snapshot) {
   const [next, ...rest] = snapshot.photoQueue;
   return { ...snapshot, pendingPhoto: next ?? null, photoQueue: rest };
+}
+var PHOTO_SOFT_CAP = 5;
+var IDLE_RETURN_MS = 4 * 60 * 60 * 1e3;
+function countPhotoForRecap(snapshot) {
+  return { ...snapshot, photosSinceRecap: snapshot.photosSinceRecap + 1 };
+}
+function resetPhotosSinceRecap(snapshot) {
+  if (snapshot.photosSinceRecap === 0) return snapshot;
+  return { ...snapshot, photosSinceRecap: 0 };
+}
+function hitPhotoSoftCap(snapshot) {
+  return snapshot.photosSinceRecap >= PHOTO_SOFT_CAP;
+}
+function markActivity(snapshot, atIso) {
+  return { ...snapshot, lastActivityAt: atIso };
+}
+function isOperationalReturn(snapshot, nowMs, thresholdMs = IDLE_RETURN_MS) {
+  if (!snapshot.lastActivityAt) return false;
+  const last = new Date(snapshot.lastActivityAt).getTime();
+  if (Number.isNaN(last)) return false;
+  return nowMs - last > thresholdMs;
 }
 var AFFIRM = /\b(yes|yeah|yep|yes it does|that's right|thats right|that's it|sounds right|feels right|exactly|correct|perfect|it does|put it on|place it|save it|keep it)\b/i;
 var DECLINE = /\b(no|nope|not quite|that's not right|thats not right|don't save|do not save|leave it off|take it off|don't keep|skip it|not that)\b/i;
@@ -1104,7 +1128,9 @@ async function handleClmRequest(req, res) {
   const subscriberId = session?.subscriberId ?? null;
   const utterance = latestSubscriberUtterance(messages);
   const previousChapterId = snapshot.chapterId;
+  const operationalReturn = isOperationalReturn(snapshot, Date.now());
   snapshot = nextTurn(snapshot);
+  snapshot = markActivity(snapshot, (/* @__PURE__ */ new Date()).toISOString());
   const closed = detectClosedDoor(utterance);
   if (closed) {
     snapshot = closeScope(snapshot, closed.phrase);
@@ -1253,20 +1279,23 @@ async function handleClmRequest(req, res) {
   if (!snapshot.recapPending && subscriberId && sessionId) {
     const chapterBoundary = snapshot.chapterId !== previousChapterId;
     const timeElapsed = recapTimeElapsed(session?.recapLastAt ?? null);
-    if ((chapterBoundary || timeElapsed) && snapshot.turn > 1) {
+    const softCap = hitPhotoSoftCap(snapshot);
+    if ((chapterBoundary || timeElapsed || softCap) && snapshot.turn > 1) {
       const pendingRows = await safe(
         () => getPendingReviewRows({ subscriberId, sessionId })
       ) ?? [];
+      const reason = chapterBoundary ? "chapter boundary" : softCap ? "photo soft cap" : "20-min elapsed";
       if (pendingRows.length > 0) {
         const recapText = buildMidSessionRecapPrompt(pendingRows);
         sseChunk(res, recapText);
         snapshot = { ...snapshot, recapPending: true };
+        snapshot = resetPhotosSinceRecap(snapshot);
         await safe(() => markRecapFired(sessionId));
         await safe(
           () => appendExchange({
             sessionId,
             role: "system",
-            content: `[recap] ${chapterBoundary ? "chapter boundary" : "20-min elapsed"} \u2014 surfaced ${pendingRows.length} pending_review rows for confirmation`
+            content: `[recap] ${reason} \u2014 surfaced ${pendingRows.length} pending_review rows for confirmation`
           })
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -1274,6 +1303,7 @@ async function handleClmRequest(req, res) {
         return;
       }
       if (timeElapsed) await safe(() => markRecapFired(sessionId));
+      if (softCap) snapshot = resetPhotosSinceRecap(snapshot);
     }
   }
   const systemPrompt = buildSethSystemPrompt({
@@ -1285,6 +1315,7 @@ async function handleClmRequest(req, res) {
     pendingDraft: snapshot.pendingDraft,
     pendingPhoto: snapshot.pendingPhoto,
     queuedPhotoCount: snapshot.photoQueue.length,
+    operationalReturn,
     confirmedInChapter: confirmedInChapter(snapshot),
     recapPending: snapshot.recapPending
   });
@@ -1436,6 +1467,7 @@ async function handlePhotoUpload(req, res) {
       isLikelyPhoto: review?.isLikelyFamilyPhotograph,
       visionConfidence: review?.confidence
     });
+    snapshot = countPhotoForRecap(snapshot);
     await updateSession(sessionId, { snapshot });
     res.json({ assetId, momentId: session.snapshot.activeMomentId });
   } catch (err) {

@@ -13,7 +13,7 @@
  * spoken commentary on the next turn (→ Layer 3 Story via the confirm path).
  */
 import type { Request, Response } from 'express';
-import { clearDraft, enqueuePhoto } from '@throughline/shared';
+import { clearDraft, countPhotoForRecap, enqueuePhoto } from '@throughline/shared';
 import { describePhotograph } from './claude.js';
 import { getSession, updateSession, uploadAndPinPhoto } from './supabase.js';
 
@@ -71,6 +71,8 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
       isLikelyPhoto: review?.isLikelyFamilyPhotograph,
       visionConfidence: review?.confidence,
     });
+    // Count this photo toward the ~5-photo soft-cap recap trigger (item B).
+    snapshot = countPhotoForRecap(snapshot);
     await updateSession(sessionId, { snapshot });
 
     res.json({ assetId, momentId: session.snapshot.activeMomentId });

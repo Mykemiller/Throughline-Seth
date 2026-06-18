@@ -48,8 +48,12 @@ import {
   confirmedInChapter,
   detectClosedDoor,
   detectConfirmation,
+  hitPhotoSoftCap,
   initialStateSnapshot,
+  isOperationalReturn,
+  markActivity,
   nextTurn,
+  resetPhotosSinceRecap,
   setActiveMoment,
   spendFollowUp,
   stageDraft,
@@ -125,7 +129,11 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
 
   const utterance = latestSubscriberUtterance(messages);
   const previousChapterId = snapshot.chapterId;
+  // Detect an operational return (long inactivity gap) BEFORE stamping this
+  // turn's activity — a dropped/backgrounded session is not a closed door (B).
+  const operationalReturn = isOperationalReturn(snapshot, Date.now());
   snapshot = nextTurn(snapshot);
+  snapshot = markActivity(snapshot, new Date().toISOString());
 
   // ── 1. P0: deterministic reverence pre-filter (BEFORE Claude) ────────────
   const closed = detectClosedDoor(utterance);
@@ -297,27 +305,31 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
   }
 
   // ── 5. Mid-session recap trigger check ───────────────────────────────────
-  // Fires at the EARLIER of chapter boundary or 20-min elapsed.
-  // Does not fire if a recap is already pending.
+  // Fires at the EARLIEST of chapter boundary, 20-min elapsed, or the ~5-photo
+  // soft cap (item B). Does not fire if a recap is already pending.
   if (!snapshot.recapPending && subscriberId && sessionId) {
     const chapterBoundary = snapshot.chapterId !== previousChapterId;
     const timeElapsed = recapTimeElapsed(session?.recapLastAt ?? null);
+    const softCap = hitPhotoSoftCap(snapshot);
 
-    if ((chapterBoundary || timeElapsed) && snapshot.turn > 1) {
+    if ((chapterBoundary || timeElapsed || softCap) && snapshot.turn > 1) {
       const pendingRows = await safe(() =>
         getPendingReviewRows({ subscriberId, sessionId }),
       ) ?? [];
+      const reason = chapterBoundary ? 'chapter boundary' : softCap ? 'photo soft cap' : '20-min elapsed';
 
       if (pendingRows.length > 0) {
         const recapText = buildMidSessionRecapPrompt(pendingRows);
         sseChunk(res, recapText);
         snapshot = { ...snapshot, recapPending: true };
+        // Reset the photo counter so the soft cap doesn't re-fire every turn.
+        snapshot = resetPhotosSinceRecap(snapshot);
         await safe(() => markRecapFired(sessionId));
         await safe(() =>
           appendExchange({
             sessionId,
             role: 'system',
-            content: `[recap] ${chapterBoundary ? 'chapter boundary' : '20-min elapsed'} — surfaced ${pendingRows.length} pending_review rows for confirmation`,
+            content: `[recap] ${reason} — surfaced ${pendingRows.length} pending_review rows for confirmation`,
           }),
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -325,8 +337,10 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
         return;
       }
 
-      // No pending rows to recap — still mark fired to reset the timer.
+      // No pending rows to recap — still reset the timer/counter so the
+      // trigger doesn't re-fire on every subsequent turn.
       if (timeElapsed) await safe(() => markRecapFired(sessionId));
+      if (softCap) snapshot = resetPhotosSinceRecap(snapshot);
     }
   }
 
@@ -340,6 +354,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
     pendingDraft: snapshot.pendingDraft,
     pendingPhoto: snapshot.pendingPhoto,
     queuedPhotoCount: snapshot.photoQueue.length,
+    operationalReturn,
     confirmedInChapter: confirmedInChapter(snapshot),
     recapPending: snapshot.recapPending,
   });
