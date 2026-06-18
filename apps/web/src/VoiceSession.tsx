@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { VoiceProvider, useVoice } from '@humeai/voice-react';
 import type { SessionStateSnapshot } from '@throughline/shared';
 import { CHAPTER_ORDER } from '@throughline/shared';
 import { createSession, fetchHumeToken, fetchResumable, fetchSessionState, setChapter, setSessionStatus } from './api';
+import { diag } from './diagnostics';
 import { useTranscriptPersistence } from './useTranscriptPersistence';
 import { PhotoCapture } from './PhotoCapture';
 
@@ -32,6 +33,12 @@ export function VoiceSession() {
           fetchResumable(),
         ]);
         if (resumable.sessionId && resumable.snapshot) {
+          diag.info('session.resumed', {
+            sessionId: resumable.sessionId,
+            phase: resumable.snapshot.phase,
+            chapterId: resumable.snapshot.chapterId,
+            activeMomentId: resumable.snapshot.activeMomentId,
+          });
           if (!cancelled)
             setReady({
               accessToken,
@@ -43,8 +50,10 @@ export function VoiceSession() {
           return;
         }
         const { sessionId, snapshot } = await createSession();
+        diag.info('session.created', { sessionId, phase: snapshot.phase });
         if (!cancelled) setReady({ accessToken, configId, sessionId, snapshot, resumed: false });
       } catch (e) {
+        diag.error('session.boot.error', { message: (e as Error).message });
         if (!cancelled) setError((e as Error).message);
       }
     })();
@@ -121,12 +130,34 @@ function SethPanel({
   const connected = status.value === 'connected';
   const connecting = status.value === 'connecting';
 
+  // Track the last flow-state signature so we log on CHANGE, not every poll.
+  const lastSig = useRef<string>('');
   const refreshState = useCallback(async () => {
     try {
       const { snapshot: fresh } = await fetchSessionState(sessionId);
       setSnapshot(fresh);
+      const sig = `${fresh.phase}|${fresh.chapterId}|${fresh.activeMomentId ?? ''}|${
+        fresh.pendingPhoto ? 'photo' : 'none'
+      }|${fresh.photoQueue?.length ?? 0}`;
+      if (sig !== lastSig.current) {
+        lastSig.current = sig;
+        diag.info('flow.state', {
+          phase: fresh.phase,
+          chapterId: fresh.chapterId,
+          activeMomentId: fresh.activeMomentId,
+          pendingPhoto: fresh.pendingPhoto
+            ? {
+                assetId: fresh.pendingPhoto.assetId,
+                hasDescription: Boolean(fresh.pendingPhoto.description),
+                isLikelyPhoto: fresh.pendingPhoto.isLikelyPhoto,
+                visionConfidence: fresh.pendingPhoto.visionConfidence,
+              }
+            : null,
+          queuedPhotos: fresh.photoQueue?.length ?? 0,
+        });
+      }
     } catch (e) {
-      console.error('state refresh failed', e);
+      diag.error('flow.state.error', { message: (e as Error).message });
     }
   }, [sessionId]);
 
@@ -155,22 +186,27 @@ function SethPanel({
   }, [connected, refreshState]);
 
   const start = async () => {
+    diag.info('session.connect.start', { sessionId });
     try {
       await connect({
         auth: { type: 'accessToken', value: accessToken },
         configId,
         sessionSettings: { type: 'session_settings', customSessionId: sessionId },
       });
+      diag.info('session.connect.ok', { sessionId });
     } catch (e) {
+      diag.error('session.connect.error', { message: (e as Error).message });
       console.error('[hume] connect failed', e);
     }
   };
 
   const end = async () => {
+    diag.info('session.end', { sessionId });
     disconnect();
     try {
       await setSessionStatus(sessionId, 'complete');
     } catch (e) {
+      diag.error('session.end.error', { message: (e as Error).message });
       console.error('mark complete failed', e);
     }
   };

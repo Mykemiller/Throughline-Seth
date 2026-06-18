@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { uploadPhoto } from './api';
+import { diag } from './diagnostics';
 import { blobToBase64, parseExif, stripExif } from './exif';
 
 type PreparedPhoto = Parameters<typeof uploadPhoto>[0];
@@ -50,9 +51,15 @@ export function PhotoCapture({
       if (uploadingRef.current || payloads.length === 0) return;
       uploadingRef.current = true;
       setBusy(true);
+      diag.info('photo.upload.start', { count: payloads.length, sessionId });
       try {
         for (const payload of payloads) {
-          await uploadPhoto(payload);
+          const result = await uploadPhoto(payload);
+          diag.info('photo.upload.ok', {
+            assetId: result.assetId,
+            momentId: result.momentId,
+            whenText: payload.whenText,
+          });
         }
         setPending([]);
         setNote(
@@ -62,6 +69,7 @@ export function PhotoCapture({
         );
         onPinned();
       } catch (e) {
+        diag.error('photo.upload.error', { message: (e as Error).message });
         setNote(`Couldn’t add the photograph: ${(e as Error).message}`);
       } finally {
         setBusy(false);
@@ -83,6 +91,13 @@ export function PhotoCapture({
     if (files.length === 0 || busy) return;
     setBusy(true);
     setNote(null);
+    diag.info('photo.selected', {
+      count: files.length,
+      names: files.map((f) => f.name),
+      sizes: files.map((f) => f.size),
+      hasActiveMoment,
+      retainOriginal,
+    });
     try {
       const payloads: PreparedPhoto[] = [];
       let lastStripped: Blob | null = null;
@@ -100,6 +115,13 @@ export function PhotoCapture({
         };
         if (retainOriginal) payload.originalBase64 = await blobToBase64(file);
         payloads.push(payload);
+        diag.info('photo.prepared', {
+          name: file.name,
+          originalBytes: file.size,
+          strippedBytes: stripped.size,
+          whenText: exif.whenText ?? null,
+          whereText: exif.whereText ?? null,
+        });
       }
       // Show the cleaned derivative of the last selected photo straight away.
       if (lastStripped) {
@@ -114,6 +136,13 @@ export function PhotoCapture({
         await uploadAll(payloads);
       } else {
         // No Moment yet — hold them; the effect attaches once one is placed.
+        // This is the common "photo never reaches the server" cause: a photo
+        // shared before any Moment exists (e.g. during the Introduction) sits
+        // here until the conversation produces one.
+        diag.warn('photo.held.no_active_moment', {
+          count: payloads.length,
+          note: 'upload deferred until a Moment is placed; no POST /api/photos yet',
+        });
         setPending(payloads);
         setNote(
           payloads.length > 1
@@ -122,6 +151,7 @@ export function PhotoCapture({
         );
       }
     } catch (e) {
+      diag.error('photo.prepare.error', { message: (e as Error).message });
       setNote(`Couldn’t prepare the photograph: ${(e as Error).message}`);
     } finally {
       setBusy(false);

@@ -24,12 +24,30 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
     res.status(400).json({ error: 'sessionId and strippedBase64 are required' });
     return;
   }
+  // Diagnostic: log every upload that reaches the server, including the
+  // strippedBase64 size, so a request that arrives but is rejected (e.g. no
+  // active Moment) is visible in the platform logs.
+  console.log(
+    '[photos] request',
+    JSON.stringify({
+      sessionId: typeof sessionId === 'string' ? sessionId : null,
+      strippedBytes: typeof strippedBase64 === 'string' ? strippedBase64.length : 0,
+      retainOriginal: retainOriginal === true,
+      hasWhenText: Boolean(whenText),
+    }),
+  );
+
   const session = await getSession(sessionId);
   if (!session) {
+    console.warn('[photos] rejected: session not found', sessionId);
     res.status(404).json({ error: 'session not found' });
     return;
   }
   if (!session.snapshot.activeMomentId) {
+    console.warn(
+      '[photos] rejected: no active Moment to pin to',
+      JSON.stringify({ sessionId, phase: session.snapshot.phase, chapterId: session.snapshot.chapterId }),
+    );
     res.status(409).json({
       error:
         'no active Moment to pin to yet — confirm a Moment with Seth first, then add the photograph',
