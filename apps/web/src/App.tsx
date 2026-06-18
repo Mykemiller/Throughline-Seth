@@ -1,4 +1,5 @@
 import { VoiceSession } from './VoiceSession';
+import { BUILD_ID, downloadDiagLog } from './diagnostics';
 
 /**
  * The entire First Thread voice surface is gated behind `first_thread_voice`
@@ -26,6 +27,14 @@ export function App() {
           </p>
         </section>
       )}
+      <footer className="ft-footer" aria-hidden="false">
+        <span className="ft-build" title="Build (day-of-year · year : seconds past midnight, UTC)">
+          build {BUILD_ID}
+        </span>
+        <button type="button" className="ft-diag-link" onClick={() => downloadDiagLog()}>
+          diagnostics
+        </button>
+      </footer>
     </main>
   );
 }

@@ -1480,12 +1480,26 @@ async function handlePhotoUpload(req, res) {
     res.status(400).json({ error: "sessionId and strippedBase64 are required" });
     return;
   }
+  console.log(
+    "[photos] request",
+    JSON.stringify({
+      sessionId: typeof sessionId === "string" ? sessionId : null,
+      strippedBytes: typeof strippedBase64 === "string" ? strippedBase64.length : 0,
+      retainOriginal: retainOriginal === true,
+      hasWhenText: Boolean(whenText)
+    })
+  );
   const session = await getSession(sessionId);
   if (!session) {
+    console.warn("[photos] rejected: session not found", sessionId);
     res.status(404).json({ error: "session not found" });
     return;
   }
   if (!session.snapshot.activeMomentId) {
+    console.warn(
+      "[photos] rejected: no active Moment to pin to",
+      JSON.stringify({ sessionId, phase: session.snapshot.phase, chapterId: session.snapshot.chapterId })
+    );
     res.status(409).json({
       error: "no active Moment to pin to yet \u2014 confirm a Moment with Seth first, then add the photograph"
     });

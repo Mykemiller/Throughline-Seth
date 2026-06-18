@@ -38,6 +38,43 @@ body {
   margin: var(--tl-space-2) 0 0;
 }
 
+/* Build stamp + diagnostics, fixed bottom-left, in the tagline's display face. */
+.ft-footer {
+  position: fixed;
+  left: var(--tl-space-3);
+  bottom: var(--tl-space-2);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  z-index: 5;
+}
+
+.ft-build {
+  font-family: var(--tl-font-display);
+  font-style: italic;
+  font-size: 13px;
+  color: var(--tl-parchment-dim);
+  opacity: 0.7;
+}
+
+.ft-diag-link {
+  font-family: var(--tl-font-display);
+  font-style: italic;
+  font-size: 13px;
+  color: var(--tl-parchment-dim);
+  opacity: 0.55;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ft-diag-link:hover {
+  opacity: 0.9;
+}
+
 .ft-card {
   background: var(--tl-parchment);
   color: var(--tl-ink);
