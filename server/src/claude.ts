@@ -171,7 +171,32 @@ export async function describePhotograph(args: {
       .trim();
     return text || undefined;
   } catch (err) {
-    console.error('[claude] photo description failed (non-fatal):', err);
+    // Best-effort: never block the pin. But surface WHY in a single structured
+    // line so a swallowed failure is diagnosable from the platform logs — the
+    // raw error object serializes unhelpfully on serverless. Includes the model
+    // and image size because the usual culprits are an API rejection (bad
+    // model/key/permission → has a status + request_id) vs a client-side throw
+    // (no status — e.g. a corrupt header), and an oversized image.
+    const e = err as {
+      name?: string;
+      message?: string;
+      status?: number;
+      request_id?: string;
+      requestID?: string;
+      error?: { type?: string; error?: { type?: string } };
+    };
+    console.error(
+      '[claude] photo description failed (non-fatal):',
+      JSON.stringify({
+        model: CLAUDE_MODEL,
+        imageBase64Bytes: args.strippedJpegBase64?.length ?? 0,
+        name: e?.name,
+        status: e?.status ?? null,
+        apiErrorType: e?.error?.error?.type ?? e?.error?.type ?? null,
+        requestId: e?.request_id ?? e?.requestID ?? null,
+        message: e?.message,
+      }),
+    );
     return undefined;
   }
 }
