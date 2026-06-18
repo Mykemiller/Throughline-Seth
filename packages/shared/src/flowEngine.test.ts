@@ -14,10 +14,16 @@ import {
   dequeuePhoto,
   detectConfirmation,
   enqueuePhoto,
+  hitPhotoSoftCap,
+  countPhotoForRecap,
   isFinalChapter,
   isIntro,
+  isOperationalReturn,
   jumpToChapter,
+  markActivity,
+  PHOTO_SOFT_CAP,
   recordConfirmedMoment,
+  resetPhotosSinceRecap,
   reviveSnapshot,
   setActiveMoment,
   silenceToleranceMs,
@@ -167,6 +173,30 @@ test('enqueuePhoto pins the first photo and queues the rest (batch intake)', () 
   snap = dequeuePhoto(snap);
   assert.equal(snap.pendingPhoto, null); // queue drained
   assert.equal(snap.photoQueue.length, 0);
+});
+
+test('photo soft cap fires at PHOTO_SOFT_CAP and resets', () => {
+  let snap = initialStateSnapshot();
+  assert.equal(hitPhotoSoftCap(snap), false);
+  for (let i = 0; i < PHOTO_SOFT_CAP - 1; i++) snap = countPhotoForRecap(snap);
+  assert.equal(hitPhotoSoftCap(snap), false); // one short
+  snap = countPhotoForRecap(snap);
+  assert.equal(snap.photosSinceRecap, PHOTO_SOFT_CAP);
+  assert.equal(hitPhotoSoftCap(snap), true);
+  snap = resetPhotosSinceRecap(snap);
+  assert.equal(snap.photosSinceRecap, 0);
+  assert.equal(hitPhotoSoftCap(snap), false);
+});
+
+test('isOperationalReturn detects a long inactivity gap, not a fresh session', () => {
+  const fresh = initialStateSnapshot();
+  assert.equal(isOperationalReturn(fresh, Date.parse('2026-06-18T12:00:00Z')), false); // no lastActivityAt
+
+  const active = markActivity(fresh, '2026-06-18T08:00:00.000Z');
+  // 4h + 1min later → operational return.
+  assert.equal(isOperationalReturn(active, Date.parse('2026-06-18T12:01:00Z')), true);
+  // 10 min later → still in the same live exchange, not a return.
+  assert.equal(isOperationalReturn(active, Date.parse('2026-06-18T08:10:00Z')), false);
 });
 
 test('reviveSnapshot preserves v5 photo-series fields on round-trip', () => {

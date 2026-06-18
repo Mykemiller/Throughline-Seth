@@ -270,6 +270,12 @@ export interface BuildPromptContext {
   pendingPhoto: PendingPhoto | null;
   /** Photos waiting behind the in-focus one (batch intake, item A). */
   queuedPhotoCount?: number;
+  /**
+   * The session just resumed after a long inactivity gap (item B) — an
+   * operational timeout, NOT a closed door. Seth opens with a gentle re-entry
+   * nudge before anything else.
+   */
+  operationalReturn?: boolean;
   confirmedInChapter: number;
 }
 
@@ -324,6 +330,10 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
   const followUp = ctx.followUpSpent
     ? `\n\nYou have already used this chapter's one bounded follow-up. Return to the spine and move the chapter toward its Moment.`
     : `\n\nYou may ask at most ONE bounded follow-up in this chapter. ${chapter.followUpGuidance}`;
+
+  const reentry = ctx.operationalReturn
+    ? `\n\nThe conversation just resumed after a long pause — the app was backgrounded or they stepped away. This is an OPERATIONAL return, NOT a closed door: do not treat the gap as anything tender. Open THIS turn with a single gentle, open-ended re-entry nudge that picks the thread back up where you left off ("Welcome back — no rush at all; we were just looking at that picture when we paused."), then let them lead.`
+    : '';
 
   const recap = ctx.recapPending
     ? `\n\nYou have just gently recapped the Moments you've been holding onto and asked whether they feel right. This turn, simply receive the person's answer — a yes, a small correction, or a "leave that one." Don't re-list everything; acknowledge warmly and carry on. The app records their verdict; never say "saved".`
@@ -387,7 +397,7 @@ Chapter opening (use this wording when opening the chapter): "${chapter.openingP
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(', ') : 'present-moment anchor'}.${
     chapter.extraGuidance ? `\n${chapter.extraGuidance}` : ''
-  }${followUp}${closed}${carry}${confirm}${recap}${photo}${completeness}
+  }${reentry}${followUp}${closed}${carry}${confirm}${recap}${photo}${completeness}
 
 Speak as Seth for this turn. If — and only if — the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;

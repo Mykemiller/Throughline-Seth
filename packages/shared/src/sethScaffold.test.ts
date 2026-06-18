@@ -136,6 +136,18 @@ test('no queued photos → no batch note', () => {
   assert.ok(!p.includes('BEAT 0b — BATCH'));
 });
 
+test('operationalReturn injects a gentle re-entry nudge directive', () => {
+  const p = buildSethSystemPrompt(baseCtx({ operationalReturn: true }));
+  assert.match(p, /resumed after a long pause/);
+  assert.match(p, /OPERATIONAL return, NOT a closed door/);
+  assert.match(p, /re-entry nudge/);
+});
+
+test('no operationalReturn → no re-entry directive', () => {
+  const p = buildSethSystemPrompt(baseCtx());
+  assert.ok(!p.includes('resumed after a long pause'));
+});
+
 test('reverence preamble distinguishes operational timeout from emotional decline', () => {
   const p = buildSethSystemPrompt(baseCtx());
   assert.match(p, /Operational silence is NOT an emotional decline/);
