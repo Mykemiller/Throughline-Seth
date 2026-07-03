@@ -118,6 +118,8 @@ export async function writeAmbientStory(args: {
   draft: StoryDraftPayload;
   turn: number;
   anchorMomentId: string | null;
+  /** Flat provenance tags — e.g. ['photo_walk'] for a photo's story (orphan check). */
+  clusterTags?: string[];
 }): Promise<CommittedMoment> {
   const key = idempotencyKey({
     subscriberId: args.subscriberId,
@@ -152,6 +154,7 @@ export async function writeAmbientStory(args: {
       chapter: args.draft.chapterId,
       layer: 3,
       cluster_root_id: args.anchorMomentId,
+      cluster_tags: Array.isArray(args.clusterTags) ? args.clusterTags : [],
       created_by: 'seth',
       sync_idempotency_key: key,
     })
@@ -282,8 +285,11 @@ export async function getPriorSessionMoments(args: {
  * Format: "Last time you told me about [X] and [Y]. I've held onto those.
  * Shall we carry on?"
  */
-export function buildNextSessionRecapPrompt(moments: PriorSessionMoment[]): string {
-  if (moments.length === 0) return '';
+export function buildNextSessionRecapPrompt(
+  moments: PriorSessionMoment[],
+  unmatchedNames: string[] = [],
+): string {
+  if (moments.length === 0 && unmatchedNames.length === 0) return '';
   const titles = moments.map((m) => m.title);
   let listStr: string;
   if (titles.length === 1) {
@@ -295,9 +301,11 @@ export function buildNextSessionRecapPrompt(moments: PriorSessionMoment[]): stri
     const rest = titles.slice(0, -1).join(', ');
     listStr = `${rest}, and ${last}`;
   }
+  const namesAsk = buildUnmatchedNamesAsk(unmatchedNames);
+  if (titles.length === 0) return `Welcome back. ${namesAsk}`.trim();
   return (
     `Last time you told me about ${listStr}. ` +
-    `I've held onto those. Shall we carry on?`
+    `I've held onto those.${namesAsk ? ` ${namesAsk}` : ' Shall we carry on?'}`
   );
 }
 
@@ -308,8 +316,11 @@ export function buildNextSessionRecapPrompt(moments: PriorSessionMoment[]): stri
  * Format: "Before we move on — you mentioned [X] and [Y]. I've held onto
  * both of those. Does that feel right?"
  */
-export function buildMidSessionRecapPrompt(rows: PendingReviewRow[]): string {
-  if (rows.length === 0) return '';
+export function buildMidSessionRecapPrompt(
+  rows: PendingReviewRow[],
+  unmatchedNames: string[] = [],
+): string {
+  if (rows.length === 0 && unmatchedNames.length === 0) return '';
   const titles = rows.map((r) => r.title);
   let listStr: string;
   if (titles.length === 1) {
@@ -321,11 +332,32 @@ export function buildMidSessionRecapPrompt(rows: PendingReviewRow[]): string {
     const rest = titles.slice(0, -1).join(', ');
     listStr = `${rest}, and ${last}`;
   }
+  const namesAsk = buildUnmatchedNamesAsk(unmatchedNames);
+  if (titles.length === 0) return `Before we move on — ${lowerFirst(namesAsk)}`;
   const bothOrAll = titles.length === 1 ? 'that' : titles.length === 2 ? 'both of those' : 'all of those';
   return (
     `Before we move on — you mentioned ${listStr}. ` +
-    `I've held onto ${bothOrAll}. Does that feel right?`
+    `I've held onto ${bothOrAll}. Does that feel right?${namesAsk ? ` ${namesAsk}` : ''}`
   );
+}
+
+/**
+ * The unmatched-name lifecycle ask (HIGH-finding fix): every photo_persons row
+ * still 'unmatched' is surfaced explicitly at recap — promote to a stub family
+ * record on yes, discard on no, roll forward if unresolved. Never silent limbo.
+ */
+export function buildUnmatchedNamesAsk(names: string[]): string {
+  if (names.length === 0) return '';
+  if (names.length === 1) {
+    return `You mentioned ${names[0]} in a photograph — I don't have ${names[0]} in the family record. Should I add ${names[0]}?`;
+  }
+  const last = names[names.length - 1];
+  const rest = names.slice(0, -1).join(', ');
+  return `You mentioned ${rest} and ${last} in the photographs — I don't have them in the family record. Should I add them?`;
+}
+
+function lowerFirst(s: string): string {
+  return s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 }
 
 // ── Reverence ─────────────────────────────────────────────────────────────

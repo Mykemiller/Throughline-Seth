@@ -13,7 +13,13 @@
  * spoken commentary on the next turn (→ Layer 3 Story via the confirm path).
  */
 import type { Request, Response } from 'express';
-import { clearDraft, countPhotoForRecap, enqueuePhoto, holdPhoto } from '@throughline/shared';
+import {
+  clearDraft,
+  clearPhotoAskAwaiting,
+  countPhotoForRecap,
+  enqueuePhoto,
+  holdPhoto,
+} from '@throughline/shared';
 import { describePhotograph } from './claude.js';
 import { getSession, updateSession, uploadAndPinPhoto, uploadPhotoBytes } from './supabase.js';
 
@@ -63,7 +69,8 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
         retainOriginal: retainOriginal === true,
       });
       const review = await describePhotograph({ strippedJpegBase64: strippedBase64 });
-      const snapshot = holdPhoto(session.snapshot, {
+      // A photo arriving IS the answer to this chapter's photo ask (AC8).
+      const snapshot = holdPhoto(clearPhotoAskAwaiting(session.snapshot), {
         storageUrl,
         retainOriginal: retainOriginal === true,
         whenText: typeof whenText === 'string' && whenText ? whenText : undefined,
@@ -110,6 +117,8 @@ export async function handlePhotoUpload(req: Request, res: Response): Promise<vo
     // the current one — so several uploads in one turn become a calm queue
     // (batch intake) rather than overwriting each other.
     let snapshot = clearDraft(session.snapshot);
+    // A photo arriving IS the answer to this chapter's photo ask (AC8).
+    snapshot = clearPhotoAskAwaiting(snapshot);
     snapshot = enqueuePhoto(snapshot, {
       assetId,
       momentId: session.snapshot.activeMomentId,

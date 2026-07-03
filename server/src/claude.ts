@@ -34,7 +34,15 @@ const RECORD_PAYLOAD_TOOL: Anthropic.Tool = {
     properties: {
       kind: {
         type: 'string',
-        enum: ['moment_draft', 'story_draft', 'closed_topic_event', 'chapter_complete', 'intro_complete'],
+        enum: [
+          'moment_draft',
+          'story_draft',
+          'closed_topic_event',
+          'chapter_complete',
+          'intro_complete',
+          'photo_details',
+          'photo_ask_outcome',
+        ],
       },
       title: { type: 'string', description: 'Short title (moment_draft / story_draft).' },
       summary: { type: 'string', description: 'Grounded summary (moment_draft).' },
@@ -58,6 +66,29 @@ const RECORD_PAYLOAD_TOOL: Anthropic.Tool = {
       name: {
         type: 'string',
         description: "intro_complete: the subscriber's name as they gave it.",
+      },
+      placeText: {
+        type: 'string',
+        description: 'photo_details: where the photo was, exactly as the person placed it.',
+      },
+      personNames: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'photo_details: names the person gave for people IN the photo — their words only.',
+      },
+      noPeople: {
+        type: 'boolean',
+        description: 'photo_details: the person indicated no one to name in this photo.',
+      },
+      threadComplete: {
+        type: 'boolean',
+        description:
+          "photo_details: all three photo beats (memory, time & place, who's in it) have been touched — offered counts — and this photo's thread feels complete.",
+      },
+      outcome: {
+        type: 'string',
+        enum: ['declined'],
+        description: "photo_ask_outcome: the person declined this chapter's photo invitation.",
       },
     },
     required: ['kind'],
@@ -296,6 +327,27 @@ function coercePayload(input: unknown, chapterId: ChapterId): FirstThreadPayload
   }
   if (kind === 'intro_complete' && typeof o.name === 'string' && o.name.trim() !== '') {
     return { kind, name: o.name.trim() };
+  }
+  if (kind === 'photo_details') {
+    const names = Array.isArray(o.personNames)
+      ? (o.personNames as unknown[])
+          .filter((n): n is string => typeof n === 'string')
+          .map((n) => n.trim())
+          .filter(Boolean)
+      : undefined;
+    return {
+      kind,
+      whenText: typeof o.whenText === 'string' && o.whenText.trim() ? o.whenText.trim() : undefined,
+      placeText:
+        typeof o.placeText === 'string' && o.placeText.trim() ? o.placeText.trim() : undefined,
+      personNames: names && names.length > 0 ? names : undefined,
+      noPeople: o.noPeople === true ? true : undefined,
+      threadComplete: o.threadComplete === true ? true : undefined,
+      chapterId,
+    };
+  }
+  if (kind === 'photo_ask_outcome' && o.outcome === 'declined') {
+    return { kind, outcome: 'declined', chapterId };
   }
   return null;
 }
