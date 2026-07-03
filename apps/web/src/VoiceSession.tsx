@@ -96,14 +96,25 @@ export function VoiceSession() {
 
 function ConnectedSession({ accessToken, configId, sessionId, snapshot, resumed }: Ready) {
   const { handleMessage } = useTranscriptPersistence(sessionId);
+  // Keep the last voice-layer error so the UI can say WHY a connection failed
+  // instead of a bare "error" pill (the message also lands in diagnostics).
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   return (
-    <VoiceProvider onMessage={handleMessage} onError={(e) => console.error('[hume]', e)}>
+    <VoiceProvider
+      onMessage={handleMessage}
+      onError={(e) => {
+        console.error('[hume]', e);
+        diag.error('hume.error', { message: e?.message ?? String(e) });
+        setVoiceError(e?.message ?? 'connection error');
+      }}
+    >
       <SethPanel
         accessToken={accessToken}
         configId={configId}
         sessionId={sessionId}
         initialSnapshot={snapshot}
         resumed={resumed}
+        voiceError={voiceError}
       />
     </VoiceProvider>
   );
@@ -126,12 +137,14 @@ function SethPanel({
   sessionId,
   initialSnapshot,
   resumed,
+  voiceError,
 }: {
   accessToken: string;
   configId: string;
   sessionId: string;
   initialSnapshot: SessionStateSnapshot;
   resumed: boolean;
+  voiceError?: string | null;
 }) {
   const { connect, disconnect, status, isMuted, mute, unmute, messages } = useVoice();
   const [snapshot, setSnapshot] = useState(initialSnapshot);
@@ -262,7 +275,6 @@ function SethPanel({
             ? 'Introduction'
             : `Chapter · ${CHAPTER_LABELS[snapshot.chapterId] ?? snapshot.chapterId}`}
         </span>
-        <span className={`ft-status ft-status--${status.value}`}>{status.value}</span>
       </div>
 
       {resumed && !connected && (
@@ -339,6 +351,7 @@ function SethPanel({
       </ol>
       </section>
 
+      <div className="ft-rail-col">
       <aside className="ft-rail" aria-label="Your story">
         <h2 className="ft-rail__title">
           {snapshot.subscriberName ? `${snapshot.subscriberName}\u2019s story` : 'Your story'}
@@ -378,6 +391,13 @@ function SethPanel({
           Jump to any chapter whenever you like — your place is saved, and closed doors stay closed.
         </p>
       </aside>
+      <span className={`ft-status ft-status--${status.value}`} role="status">
+        {status.value}
+      </span>
+      {status.value === 'error' && voiceError && (
+        <p className="ft-status-detail">{voiceError}</p>
+      )}
+      </div>
     </div>
   );
 }
