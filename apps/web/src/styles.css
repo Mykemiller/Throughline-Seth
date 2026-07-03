@@ -346,15 +346,52 @@ code {
   text-align: center;
 }
 
-.ft-rail {
+/* Right column: the chapter rail box with the status pill just below it. */
+.ft-rail-col {
   flex: 0 0 224px;
   position: sticky;
   top: var(--tl-space-3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--tl-space-2);
+}
+
+.ft-rail {
+  width: 100%;
   background: var(--tl-deep-river-soft);
   border: 1px solid rgba(242, 230, 188, 0.18);
   border-radius: var(--tl-radius);
   padding: var(--tl-space-3);
   color: var(--tl-parchment);
+}
+
+/* The status pill lives on the dark column now — tone it to the background. */
+.ft-rail-col .ft-status {
+  background: rgba(242, 230, 188, 0.1);
+  color: var(--tl-parchment-dim);
+}
+
+.ft-rail-col .ft-status--connected {
+  background: rgba(40, 120, 80, 0.35);
+  color: #9fd4b4;
+}
+
+.ft-rail-col .ft-status--error {
+  background: rgba(150, 50, 40, 0.35);
+  color: #d98b80;
+}
+
+/* The voice layer's actual error text, shown under the pill on failure. */
+.ft-status-detail {
+  margin: 0;
+  max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #d98b80;
+  text-align: center;
+  word-break: break-word;
 }
 
 .ft-rail__title {
@@ -477,7 +514,7 @@ code {
     width: 160px;
     order: -2;
   }
-  .ft-rail {
+  .ft-rail-col {
     position: static;
     flex-basis: auto;
     width: 100%;
