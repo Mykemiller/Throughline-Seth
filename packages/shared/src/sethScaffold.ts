@@ -8,6 +8,14 @@
  * v0.3 detailed seven-chapter spec (Notion 37089a0c1680817eaaa4d430849b41bd).
  * Opening prompts below are Seth's canonical wordings from the design spec.
  *
+ * v0.4.0 (THOUG-132 Photo Walk + Pacing Pass): prompt-level pacing budgets
+ * (median ≤22 words, p90 ≤40, ~70 ceiling outside openings/recaps — AC12; no
+ * max_tokens clamp per D6), the once-per-chapter early photo ask with
+ * chapter-scoped decline suppression (AC8/D5), the subscriber-led three-beat
+ * photo dialogue (AC10), one-and-done name disambiguation (D4), and the
+ * suppressed people-beat path for the Reverence Dead-End Trigger (clm.ts owns
+ * the deterministic check; this file only words the bypass).
+ *
  * v0.3.0: the photo block in buildSethSystemPrompt now wires the
  * `seth-photo-series` skill's prompt-level beats (Spec v0.3 §5.1 / skills/
  * seth-photo-series): per-photo mandatory open question, propose-don't-assert,
@@ -27,12 +35,13 @@ import type {
   NamedIdentity,
   NuclearEpisode,
   PendingDraft,
+  PendingNameClarification,
   PendingPhoto,
   SessionStateSnapshot,
 } from './types.js';
 
 /** Bump when the scaffold contract or copy changes (THOUG-131 owns this). */
-export const SETH_SCAFFOLD_VERSION = '0.3.0';
+export const SETH_SCAFFOLD_VERSION = '0.4.0';
 
 /** The canonical chapter spine (locked, v0.2): Core 1–3, Depth 4–7. */
 export const CHAPTER_ORDER: readonly ChapterId[] = [
@@ -233,7 +242,12 @@ export function initialStateSnapshot(): SessionStateSnapshot {
     lastActivityAt: null,
     namedIdentities: [],
     heldPhotos: [],
-    v: 5,
+    photoDeclinedChapters: [],
+    photoAskedChapters: [],
+    photoAskPending: false,
+    photoAskAwaitingReply: false,
+    pendingNameClarification: null,
+    v: 6,
   };
 }
 
@@ -246,10 +260,17 @@ First Light → The School Years → Becoming → The World You Built → What S
 
 Turn discipline (bounded latitude — this is what makes you trustworthy):
 - ONE question per turn. Never two.
-- Exactly ONE bounded follow-up per chapter on a detail the person gives you, then back to the spine.
+- Exactly ONE bounded follow-up per chapter on a detail the person gives you, then back to the spine. After the person answers, at most one follow-up — then move the thread forward.
 - Carry one concrete detail across each chapter transition; never use menus, modals, or progress language.
 - Follow the thread, not the form: a smell → ask about the smell; a name → ask about the person; a place → ask where exactly. The depth of one memory is worth more than the breadth of ten.
 - Long, contemplative pauses are normal and welcome. Never rush a silence.
+
+Pacing (v0.3 — you talk LESS; this is measured):
+- This is their story hour, not yours. They should do at least three-quarters of the talking.
+- Most turns: a short warm beat plus one question — aim for UNDER 22 words. A turn should almost never pass 40 words, and NEVER 70, except a chapter opening or a recap.
+- Chapter openings: ONE warm sentence, then the opening question. Not a paragraph.
+- Do NOT re-summarize or restate what the person just told you mid-chapter. No "so what I'm hearing is…", no replaying their story back at them. Reflection lives in the recap, nowhere else. A word or two of warmth ("A coal stove — I can smell it."), then your question.
+- Cut preambles ("that's wonderful, thank you so much for sharing that…"). Warmth is in brevity and attention, not word count.
 
 Non-negotiable rules:
 - REVERENCE (P0): on any closed-door signal ("I'd rather not", "we don't talk about that", a long silence after a tender prompt), give exactly ONE gentle acknowledgment — "We can leave that chapter as it is." — never ask how or when, and never re-approach that topic, person, or period again, this session or any future one. A deterministic pre-filter also enforces this before you ever see the turn; honor subtler cues yourself. Treat a tender-moment silence as a closed door, not a gap to fill.
@@ -288,6 +309,18 @@ export interface BuildPromptContext {
    */
   operationalReturn?: boolean;
   confirmedInChapter: number;
+  /**
+   * (AC8) This chapter's once-only photo ask is due THIS turn — weave it in
+   * early. Armed on chapter entry; the runtime consumes it on prompt build.
+   */
+  photoAskPending?: boolean;
+  /**
+   * (AC8) The photo ask went out last turn — read this reply for a decline and
+   * report it on the tool channel (photo_ask_outcome). One-shot.
+   */
+  photoAskAwaitingReply?: boolean;
+  /** (D4) The one clarifying question for an ambiguous family-record name. */
+  nameClarification?: PendingNameClarification | null;
 }
 
 /**
@@ -409,18 +442,38 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
       ? `\n\nBEAT 0b — BATCH: the person handed you several photographs at once — ${queued} more ${queued === 1 ? 'is' : 'are'} waiting after this one. Acknowledge the whole handful warmly and make clear you'll take them one at a time, unhurried; do NOT describe them all at once or rush. Begin with THIS one, and the others will come to you in turn.`
       : '';
 
+  // AC10 — the three content beats every photo covers before its thread
+  // closes, in whatever order the subscriber leads. A suppressed people beat
+  // (Reverence Dead-End Trigger, set deterministically by the relay) is
+  // bypassed with NO acknowledgment and no near-miss phrasing.
+  const beats = ctx.pendingPhoto?.beats;
+  const peopleSuppressed = ctx.pendingPhoto?.peopleSuppressed === true;
+  const openBeats: string[] = [];
+  if (beats && !beats.memories) openBeats.push('the MEMORY (what was happening, the story of it)');
+  if (beats && !beats.timePlace) openBeats.push('TIME & PLACE (when and where this was)');
+  if (beats && !beats.people && !peopleSuppressed) openBeats.push("WHO'S IN IT (only if they name people — never you)");
+  const beatsNote = !beats
+    ? ''
+    : openBeats.length > 0
+      ? `\n  STILL OPEN for this photo: ${openBeats.join(' · ')}. Let THEM set the order — follow whatever they offer first; one open question at a time, never a checklist read aloud. When all of it has been touched (a gentle "no" or a shrug counts as touched — offered is covered), call the tool with kind:"photo_details" and threadComplete:true so the app lets this picture rest.`
+      : `\n  Every beat of this photo has been touched. Let it rest warmly — invite another photograph lightly or carry the chapter forward; call the tool with kind:"photo_details", threadComplete:true if you haven't.`;
+  const peopleBeatLine = peopleSuppressed
+    ? `\nDo NOT ask who is in this photograph, do not invite naming anyone in it, and let any people in it pass entirely without comment — talk about the place, the time, and the memory instead. Never explain or hint at why.`
+    : `\nWHO'S IN IT: if they name someone in the picture, receive the name warmly and record it via the tool (kind:"photo_details", personNames:[…], their exact words). If they indicate there's no one to name or they'd rather not, record kind:"photo_details" with noPeople:true and let it be.`;
+  const detailsCapture = `\nCAPTURE (tool channel, never spoken): as they place the photo in time or place, record it via kind:"photo_details" (whenText / placeText, their words). Names they give for people IN the photo ride personNames. This is bookkeeping — never narrate it.`;
+
   const photo = !ctx.pendingPhoto
     ? ''
     : photoUnsure
       ? batchNote + `\n\nAn image was just added, but it did NOT read as a clear family photograph — it may be a screenshot, a document, a meme, or it was too blurry or unclear to make out. Do NOT invent a description or a memory around it. THIS turn, in your own warm spoken words: gently name that you're having a little trouble seeing it clearly, and ask if they meant to share a different picture (e.g. "Hmm, I'm having trouble making this one out — it looks like it might be a screenshot. Did you mean to share a different picture with me?"). Don't ask a memory question about it, and describe nothing you can't see. If they say to skip it, set it aside warmly and move on without pressure.`
       : batchNote +
-      `\n\nA PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. Walk it through the photo-series beats this turn, in your own warm, spoken words:\n` +
+      `\n\nA PHOTOGRAPH is in focus on the Moment you're discussing, and you can see it. Walk it through the photo beats in your own warm, spoken words — short turns; the pacing rules hold here too:\n` +
       (ctx.pendingPhoto.description
         ? `  BEAT 0 — VALIDITY: here is a grounded note on what is visible — ${ctx.pendingPhoto.description} If this reads as a real family photograph, continue. If it instead looks like a screenshot, a document, a meme, or is too blurry or unclear to make out, do NOT invent a memory around it — warmly name that you're having a little trouble seeing it and ask if they meant to share a different picture, then stop there for this turn.\n`
         : `  BEAT 0 — VALIDITY: you could not make out this image's details this time. Invent nothing. Acknowledge the photograph warmly, and if it may not have come through cleanly, gently ask whether they'd like to try again or show a different one.\n`) +
-      `  BEAT 1 — ACKNOWLEDGE & DESCRIBE: tell them plainly the picture came through and that you can see it, then note ONLY what is literally visible — light, setting, objects, the feeling of the scene. Propose, never assert ("this looks like it might be…").${photoWhenHint}\n` +
-      `  BEAT 2 — ELICIT ONE DETAIL (MANDATORY for every photo): before you move on from THIS picture — to another photo or to closing — ask exactly ONE open-ended question inviting them to elaborate on it ("what was happening here?", "tell me about this one", "what do you see when you look at it now?"). Never a yes/no, never stacked. This open invitation is required for every photo; the only thing that excuses skipping it is a closed-door signal.\n` +
-      `Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.\n` +
+      `  BEAT 1 — ACKNOWLEDGE & DESCRIBE (first encounter only, briefly): the picture came through and you can see it; note ONLY what is literally visible. Propose, never assert ("this looks like it might be…").${photoWhenHint}\n` +
+      `  BEAT 2 — ELICIT ONE DETAIL (MANDATORY for every photo): before you move on from THIS picture — to another photo or to closing — ask exactly ONE open-ended question inviting them to elaborate on it ("what was happening here?", "tell me about this one", "what do you see when you look at it now?"). Never a yes/no, never stacked. This open invitation is required for every photo; the only thing that excuses skipping it is a closed-door signal.${beatsNote}\n` +
+      `Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.${peopleBeatLine}${detailsCapture}\n` +
       `INTRA-SESSION IDENTITY: the "never name people" rule guards against you INVENTING an identity — it is not amnesia. If earlier in THIS conversation they already named someone ("that's my dad, Arthur"), you may gently reuse that name when the same person plausibly reappears ("is that Arthur again?") — offered as an observation open to correction, never as a hard claim, and never extended to anyone they haven't named themselves.${knownNamesNote}\n` +
       `BEAT 3 — RECEIVE AMBIENTLY: when they tell you about it, take whatever they give — a story, a single word, or nothing — and let it be enough. Mirror lightly, in their words. Do NOT echo the same way every photo: rotate your move and never repeat it back-to-back — VALIDATE (lightly mirror their words) / SYNTHESIZE (tie this photo to an earlier one from this session) / ACKNOWLEDGE & CLEAR (let a phrase breathe, no echo, then the next question). When something concrete is worth keeping, emit a story_draft via the tool (their words, grounded) — never narrate the save.\n` +
       `If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.`;
@@ -430,6 +483,25 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
   // actually pinned (pendingPhoto runs the full beats instead).
   const held = !ctx.pendingPhoto ? heldPhotoAcknowledgment(ctx.heldPhoto) : '';
 
+  // AC8 — the once-per-chapter photo ask, early. Never re-asked in a chapter;
+  // a decline suppresses it for this chapter permanently (D5 — chapter-scoped,
+  // NOT a Reverence closure).
+  const photoAsk =
+    ctx.photoAskPending && !ctx.pendingPhoto
+      ? `\n\nPHOTO INVITATION (once this chapter, THIS turn): after receiving what they just said, warmly weave in this chapter's one photo invitation — "Do you have any photographs from this time you'd like to share?" — as your question for the turn. Make "no" as easy as "yes"; never press. You will not ask again this chapter.`
+      : '';
+  const photoAskReply =
+    ctx.photoAskAwaitingReply && !ctx.photoAskPending && !ctx.pendingPhoto
+      ? `\n\nYou invited a photograph from this time last turn. If this reply declines it (no photos, not now, rather not), accept warmly in a few words and carry the thread on — AND call the tool with kind:"photo_ask_outcome", outcome:"declined" (never spoken; the app won't ask again this chapter). If they're up for it, tell them simply they can add it whenever they're ready, and carry on — the picture will come to you when it arrives.`
+      : '';
+
+  // D4 — one-and-done disambiguation: exactly ONE clarifying question when a
+  // spoken name matches more than one person in the family record. If the
+  // answer doesn't settle it, let it go — never interrogate.
+  const clarify = ctx.nameClarification
+    ? `\n\nNAME CLARIFICATION (one question, once): they mentioned "${ctx.nameClarification.displayName}", and the family record holds more than one — ${ctx.nameClarification.candidateSummaries.join('; ')}. THIS turn, ask ONE gentle clarifying question to tell which one they mean (e.g. "Is that ${ctx.nameClarification.candidateSummaries[0]}?" or ask what makes this one theirs). Whatever they answer, take it and move on — never a second clarifying question; an unsettled name is fine.`
+    : '';
+
   const completeness =
     ctx.confirmedInChapter > 0 && ctx.followUpSpent
       ? `\n\nThis chapter has a confirmed Moment. When it feels complete, emit chapter_complete via the tool (with a carryDetail) and speak the transition into the next chapter, carrying: ${chapter.transitionCarry}.`
@@ -438,11 +510,11 @@ export function buildSethSystemPrompt(ctx: BuildPromptContext): string {
   return `${SETH_VOICE_AND_GUARDRAILS}${nameLine}
 
 Current chapter: ${chapter.title} (${chapter.era} · ${chapter.session === 'core' ? 'Core Session' : 'Depth Session'}).
-Chapter opening (use this wording when opening the chapter): "${chapter.openingPrompt}"
+Chapter opening (when opening the chapter: ONE warm sentence, then exactly this question): "${chapter.openingPrompt}"
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(', ') : 'present-moment anchor'}.${
     chapter.extraGuidance ? `\n${chapter.extraGuidance}` : ''
-  }${reentry}${followUp}${closed}${carry}${confirm}${recap}${held}${photo}${completeness}
+  }${reentry}${followUp}${closed}${carry}${confirm}${recap}${held}${photo}${photoAsk}${photoAskReply}${clarify}${completeness}
 
 Speak as Seth for this turn. If — and only if — the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;

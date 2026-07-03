@@ -23,7 +23,9 @@ import type {
   IntroCompletePayload,
   ClosedScope,
   MomentDraftPayload,
+  PendingNameClarification,
   PendingPhoto,
+  PhotoBeats,
   SessionStateSnapshot,
   StoryDraftPayload,
 } from './types.js';
@@ -34,9 +36,18 @@ import { tokensForTopic } from './reverenceFilter.js';
 
 /**
  * Upgrade any persisted snapshot (including legacy pre-v5 shapes) to the
- * current v5 shape without losing closures. Resume must never drop a closed
- * scope. Fields added in v5 (photoQueue, photosSinceRecap, lastActivityAt,
- * namedIdentities) default safely when absent from an older snapshot.
+ * current v6 shape without losing closures. Resume must never drop a closed
+ * scope.
+ *
+ * This is the READ-TIME SHIM (THOUG-129 closing item): live
+ * rot_capture_sessions.state_snapshot rows still include legacy v2 rows
+ * (keys: v, turn, carry, chapterId, closedScopes, followUpSpent, pendingDraft,
+ * pendingPhoto, activeMomentId, confirmedMoments — no phase, no
+ * subscriberName, no recap flags). Detection is field-presence, not version
+ * arithmetic: every missing field takes its safe default from
+ * initialStateSnapshot(), phase revives as 'walk' (never replay the intro for
+ * a mid-conversation session), and v6 Photo Walk fields (photoDeclinedChapters
+ * et al.) default empty/false/null.
  */
 export function reviveSnapshot(raw: unknown): SessionStateSnapshot {
   const fresh = initialStateSnapshot();
@@ -88,6 +99,16 @@ export function reviveSnapshot(raw: unknown): SessionStateSnapshot {
     heldPhotos: Array.isArray(o.heldPhotos)
       ? (o.heldPhotos as SessionStateSnapshot['heldPhotos'])
       : [],
+    photoDeclinedChapters: Array.isArray(o.photoDeclinedChapters)
+      ? (o.photoDeclinedChapters as ChapterId[]).filter((c) => CHAPTER_ORDER.includes(c))
+      : [],
+    photoAskedChapters: Array.isArray(o.photoAskedChapters)
+      ? (o.photoAskedChapters as ChapterId[]).filter((c) => CHAPTER_ORDER.includes(c))
+      : [],
+    photoAskPending: Boolean(o.photoAskPending),
+    photoAskAwaitingReply: Boolean(o.photoAskAwaitingReply),
+    pendingNameClarification:
+      (o.pendingNameClarification as SessionStateSnapshot['pendingNameClarification']) ?? null,
   };
 }
 
@@ -133,7 +154,7 @@ export function advanceChapter(snapshot: SessionStateSnapshot): SessionStateSnap
   if (!canAdvance(snapshot)) return snapshot;
   const idx = CHAPTER_ORDER.indexOf(snapshot.chapterId);
   const next = CHAPTER_ORDER[idx + 1]!;
-  return { ...snapshot, chapterId: next, followUpSpent: false };
+  return armPhotoAsk({ ...snapshot, chapterId: next, followUpSpent: false });
 }
 
 /* ── Intro phase ──────────────────────────────────────────────────────── */
@@ -153,13 +174,13 @@ export function applyIntroComplete(
   payload: IntroCompletePayload,
 ): SessionStateSnapshot {
   const name = payload.name?.trim();
-  return {
+  return armPhotoAsk({
     ...snapshot,
     phase: 'walk',
     subscriberName: name ? name : snapshot.subscriberName,
     chapterId: snapshot.phase === 'intro' ? CHAPTER_ORDER[0]! : snapshot.chapterId,
     followUpSpent: false,
-  };
+  });
 }
 
 /* ── Subscriber-initiated chapter navigation (owner override 2026-06-14) ───── */
@@ -179,13 +200,13 @@ export function jumpToChapter(
 ): SessionStateSnapshot {
   if (!CHAPTER_ORDER.includes(target)) return snapshot;
   if (snapshot.phase === 'walk' && target === snapshot.chapterId) return snapshot;
-  return {
+  return armPhotoAsk({
     ...snapshot,
     phase: 'walk',
     chapterId: target,
     followUpSpent: false,
     pendingDraft: null,
-  };
+  });
 }
 
 /**
@@ -326,8 +347,13 @@ export function enqueuePhoto(
   snapshot: SessionStateSnapshot,
   photo: PendingPhoto,
 ): SessionStateSnapshot {
-  if (!snapshot.pendingPhoto) return { ...snapshot, pendingPhoto: photo };
-  return { ...snapshot, photoQueue: [...snapshot.photoQueue, photo] };
+  const prepared: PendingPhoto = {
+    beats: { memories: false, timePlace: false, people: false },
+    ...photo,
+    focusedAtTurn: photo.focusedAtTurn ?? snapshot.turn,
+  };
+  if (!snapshot.pendingPhoto) return { ...snapshot, pendingPhoto: prepared };
+  return { ...snapshot, photoQueue: [...snapshot.photoQueue, prepared] };
 }
 
 /**
@@ -337,7 +363,8 @@ export function enqueuePhoto(
  */
 export function dequeuePhoto(snapshot: SessionStateSnapshot): SessionStateSnapshot {
   const [next, ...rest] = snapshot.photoQueue;
-  return { ...snapshot, pendingPhoto: next ?? null, photoQueue: rest };
+  const focused = next ? { ...next, focusedAtTurn: snapshot.turn } : null;
+  return { ...snapshot, pendingPhoto: focused, photoQueue: rest };
 }
 
 /** Clear the pending photo (commentary captured, or abandoned). */
@@ -361,6 +388,115 @@ export function holdPhoto(
 export function clearHeldPhotos(snapshot: SessionStateSnapshot): SessionStateSnapshot {
   if (snapshot.heldPhotos.length === 0) return snapshot;
   return { ...snapshot, heldPhotos: [] };
+}
+
+/* ── Photo Walk (THOUG-132 v0.3): chapter ask + three beats + dead end ─────── */
+
+/**
+ * Arm the once-per-chapter photo ask on chapter entry (AC8). Eligible unless
+ * the chapter was already asked, was declined (D5 chapter-scoped suppression —
+ * decline persists across sessions), or photos are already in flight.
+ */
+export function armPhotoAsk(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  const eligible =
+    !snapshot.photoAskedChapters.includes(snapshot.chapterId) &&
+    !snapshot.photoDeclinedChapters.includes(snapshot.chapterId);
+  if (snapshot.photoAskPending === eligible) return snapshot;
+  return { ...snapshot, photoAskPending: eligible };
+}
+
+/** The ask went into this turn's prompt — never re-ask this chapter (AC8). */
+export function markPhotoAsked(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  const asked = snapshot.photoAskedChapters.includes(snapshot.chapterId)
+    ? snapshot.photoAskedChapters
+    : [...snapshot.photoAskedChapters, snapshot.chapterId];
+  return {
+    ...snapshot,
+    photoAskPending: false,
+    photoAskAwaitingReply: true,
+    photoAskedChapters: asked,
+  };
+}
+
+/** The reply to the ask has been heard (or a photo arrived) — one-shot done. */
+export function clearPhotoAskAwaiting(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  if (!snapshot.photoAskAwaitingReply) return snapshot;
+  return { ...snapshot, photoAskAwaitingReply: false };
+}
+
+/**
+ * The subscriber declined this chapter's photo ask (AC8/D5): chapter-scoped,
+ * persists across sessions, and is NOT a Reverence closure — it never touches
+ * closedScopes or subscriber_closed_topics.
+ */
+export function declinePhotoAsk(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  const declined = snapshot.photoDeclinedChapters.includes(snapshot.chapterId)
+    ? snapshot.photoDeclinedChapters
+    : [...snapshot.photoDeclinedChapters, snapshot.chapterId];
+  return {
+    ...snapshot,
+    photoAskPending: false,
+    photoAskAwaitingReply: false,
+    photoDeclinedChapters: declined,
+  };
+}
+
+const NO_BEATS: PhotoBeats = { memories: false, timePlace: false, people: false };
+
+/** Beats covered so far for the photo in focus (absent = none, pre-v6 pins). */
+export function photoBeats(snapshot: SessionStateSnapshot): PhotoBeats {
+  return snapshot.pendingPhoto?.beats ?? NO_BEATS;
+}
+
+/** Mark a beat covered on the photo in focus (AC10). No-op without a photo. */
+export function markPhotoBeat(
+  snapshot: SessionStateSnapshot,
+  beat: keyof PhotoBeats,
+): SessionStateSnapshot {
+  if (!snapshot.pendingPhoto) return snapshot;
+  const beats = { ...photoBeats(snapshot), [beat]: true };
+  return { ...snapshot, pendingPhoto: { ...snapshot.pendingPhoto, beats } };
+}
+
+/**
+ * Reverence Dead-End Trigger (P0): permanently bypass the who's-in-it beat for
+ * the photo in focus. The beat is recorded as covered so the thread can still
+ * close; Seth is never told why (no acknowledgment, no near-miss phrasing).
+ */
+export function suppressPeopleBeat(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  if (!snapshot.pendingPhoto) return snapshot;
+  const beats = { ...photoBeats(snapshot), people: true };
+  return {
+    ...snapshot,
+    pendingPhoto: { ...snapshot.pendingPhoto, beats, peopleSuppressed: true },
+  };
+}
+
+/** All three beats touched (a suppressed people beat counts as covered). */
+export function photoBeatsComplete(snapshot: SessionStateSnapshot): boolean {
+  if (!snapshot.pendingPhoto) return true;
+  const b = photoBeats(snapshot);
+  return b.memories && b.timePlace && b.people;
+}
+
+/** Turns the current photo has been in focus (safety valve for a stuck thread). */
+export function photoFocusTurns(snapshot: SessionStateSnapshot): number {
+  if (!snapshot.pendingPhoto) return 0;
+  return snapshot.turn - (snapshot.pendingPhoto.focusedAtTurn ?? snapshot.turn);
+}
+
+/** Arm the one-and-done disambiguation question (D4). */
+export function setNameClarification(
+  snapshot: SessionStateSnapshot,
+  clarification: PendingNameClarification,
+): SessionStateSnapshot {
+  return { ...snapshot, pendingNameClarification: clarification };
+}
+
+/** The one clarifying question has had its answer (resolved or not) — done. */
+export function clearNameClarification(snapshot: SessionStateSnapshot): SessionStateSnapshot {
+  if (!snapshot.pendingNameClarification) return snapshot;
+  return { ...snapshot, pendingNameClarification: null };
 }
 
 /* ── Recap triggers: soft photo cap + idle/operational return (item B) ─────── */

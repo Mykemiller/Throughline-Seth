@@ -113,6 +113,46 @@ export interface NamedIdentity {
 /** How clearly the vision pass could read the image (Beat 0a gating). */
 export type VisionConfidence = 'high' | 'medium' | 'low';
 
+/* ── Photo Walk (THOUG-132 v0.3): three-beat dialogue + name matching ──────── */
+
+/**
+ * The three content beats every shared photo covers before its thread closes
+ * (AC10). Subscriber-led order — all three must be touched (offered counts;
+ * a gentle decline still covers a beat), but never interrogated in sequence.
+ */
+export interface PhotoBeats {
+  /** Memories → captured as a Layer 3 Story anchored via cluster_root_id. */
+  memories: boolean;
+  /** Time & place → EXIF prefill, gently confirmed conversationally. */
+  timePlace: boolean;
+  /** Who's in it → names matched against `persons`. */
+  people: boolean;
+}
+
+/** AC11 name-resolution tiers against `persons` (mirrors photo_persons CHECK). */
+export type PersonMatchConfidence = 'exact' | 'fuzzy' | 'ambiguous' | 'unmatched';
+
+/**
+ * A one-and-done disambiguation in flight (D4): a spoken name matched more
+ * than one `persons` candidate; Seth asks exactly ONE clarifying question. If
+ * the next reply doesn't resolve it, the row stays 'ambiguous' and we move on.
+ */
+export interface PendingNameClarification {
+  /** The name as the subscriber spoke it. */
+  displayName: string;
+  /** photo_persons row already written for this name (person_id updated on resolve). */
+  photoPersonId: string | null;
+  /** Candidate persons ids still in contention. */
+  candidateIds: string[];
+  /** Short spoken-safe summaries ("Ruth Morgan, born 1902") for the one question. */
+  candidateSummaries: string[];
+  /**
+   * 0 while armed but not yet spoken; stamped with the turn number when the
+   * question goes out. The next reply after that turn is its answer (one-shot).
+   */
+  askedTurn: number;
+}
+
 /**
  * A photo shared BEFORE any Moment exists (e.g. during the Introduction). Its
  * bytes are already in Storage and it has been vision-analyzed, but no
@@ -157,6 +197,20 @@ export interface PendingPhoto {
    */
   isLikelyPhoto?: boolean;
   visionConfidence?: VisionConfidence;
+  /**
+   * Photo Walk (AC10): which of the three beats this photo has covered.
+   * Absent on photos pinned before v6 — treated as none covered.
+   */
+  beats?: PhotoBeats;
+  /**
+   * Reverence Dead-End Trigger (P0): a name tied to this photo touched a
+   * closed topic. The who's-in-it beat is bypassed entirely — no prompting,
+   * no acknowledgment, no near-miss phrasing. Set only by the deterministic
+   * server-relay check, never by the model.
+   */
+  peopleSuppressed?: boolean;
+  /** Turn this photo came into focus (safety valve for a stuck thread). */
+  focusedAtTurn?: number;
 }
 
 /**
@@ -235,8 +289,30 @@ export interface SessionStateSnapshot {
    * the moment one is created. Empty in the common case.
    */
   heldPhotos: HeldPhoto[];
+  /* ── Photo Walk state (v6, THOUG-132) ─────────────────────────────────────── */
+  /**
+   * (AC8/D5) Chapters where the once-per-chapter photo ask was DECLINED.
+   * Chapter-scoped suppression, NOT a Reverence closure — never written to
+   * subscriber_closed_topics. Persists across sessions (carried forward into
+   * new sessions by createSession).
+   */
+  photoDeclinedChapters: ChapterId[];
+  /** (AC8) Chapters where the photo ask has already been made — never re-asked. */
+  photoAskedChapters: ChapterId[];
+  /**
+   * (AC8) The photo ask is due: armed on chapter entry, consumed by the next
+   * prompt build so the ask lands EARLY — within the first exchanges.
+   */
+  photoAskPending: boolean;
+  /**
+   * (AC8) The ask went out last turn; the next subscriber reply is read for a
+   * decline (photo_ask_outcome on the tool channel). One-shot.
+   */
+  photoAskAwaitingReply: boolean;
+  /** (D4) One-and-done name disambiguation in flight, if any. */
+  pendingNameClarification: PendingNameClarification | null;
   /** Schema version for the snapshot shape itself. */
-  v: 5;
+  v: 6;
 }
 
 /* ── Two-channel structured output (the River-write boundary) ──────────────── */
@@ -252,7 +328,42 @@ export type FirstThreadPayload =
   | StoryDraftPayload
   | ClosedTopicEventPayload
   | ChapterCompletePayload
-  | IntroCompletePayload;
+  | IntroCompletePayload
+  | PhotoDetailsPayload
+  | PhotoAskOutcomePayload;
+
+/**
+ * Photo Walk (AC10/AC11): grounded details the subscriber gave about the photo
+ * in focus, captured on the tool channel as they arrive — never invented.
+ * Drives beat tracking, place_text capture, and persons matching.
+ */
+export interface PhotoDetailsPayload {
+  kind: 'photo_details';
+  /** When the moment happened, as the subscriber placed it ("summer of 1974"). */
+  whenText?: string;
+  /** Where it was, as spoken — free text (D2; no gazetteer). */
+  placeText?: string;
+  /** People the subscriber named as being IN this photo — their words only. */
+  personNames?: string[];
+  /** The subscriber indicated no one to name / didn't want to name anyone. */
+  noPeople?: boolean;
+  /**
+   * The model attests all three beats have been touched (offered counts) and
+   * the photo's thread feels complete — releases the photo from focus.
+   */
+  threadComplete?: boolean;
+  chapterId: ChapterId;
+}
+
+/**
+ * AC8: the subscriber declined this chapter's photo ask. Chapter-scoped
+ * suppression only (D5) — never a Reverence closure.
+ */
+export interface PhotoAskOutcomePayload {
+  kind: 'photo_ask_outcome';
+  outcome: 'declined';
+  chapterId: ChapterId;
+}
 
 export interface MomentDraftPayload {
   kind: 'moment_draft';
