@@ -13,8 +13,16 @@ import { CHAPTER_ORDER, jumpToChapter } from '@throughline/shared';
 import { FIRST_THREAD_VOICE, PORT, requireSecrets } from './env.js';
 import { handleClmRequest } from './clm.js';
 import { mintHumeAccessToken } from './humeToken.js';
-import { appendExchange, createSession, findResumableSession, getSession, updateSession } from './supabase.js';
+import {
+  appendExchange,
+  createSession,
+  findResumableSession,
+  getSession,
+  listSessionPhotos,
+  updateSession,
+} from './supabase.js';
 import { handlePhotoUpload } from './photos.js';
+import { findOrphanedPhotoStories } from './photoWalk.js';
 
 export const app = express();
 app.use(cors());
@@ -69,6 +77,30 @@ app.patch('/api/sessions/:id', requireFlag, async (req, res) => {
   }
   try {
     await updateSession(id, { status });
+    // Session-close orphan check (THOUG-132, lightweight — no cron): any
+    // pending_review photo-anchored story whose asset is gone gets flagged for
+    // review via a system exchange, so the next recap surfaces it. Never
+    // hard-deleted. Best-effort — a failure here never blocks the close.
+    if (status === 'complete') {
+      try {
+        const session = await getSession(id);
+        if (session) {
+          const orphans = await findOrphanedPhotoStories(session.subscriberId);
+          for (const o of orphans) {
+            await appendExchange({
+              sessionId: id,
+              role: 'system',
+              content: `[cleanup] photo story "${o.title}" (${o.momentId}) has no surviving asset on its anchor — flagged for review at next recap`,
+            });
+          }
+          if (orphans.length > 0) {
+            console.log('[sessions:close] flagged orphaned photo stories', orphans.length);
+          }
+        }
+      } catch (err) {
+        console.error('[sessions:close] orphan check failed (non-fatal):', err);
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('[sessions:update]', err);
@@ -151,6 +183,17 @@ app.post('/api/sessions/:id/chapter', requireFlag, async (req, res) => {
 // Photo upload: EXIF-stripped bytes from the browser → Storage → media_assets
 // pinned to the active Moment (E13-05/06, THOUG-132).
 app.post('/api/photos', requireFlag, handlePhotoUpload);
+
+// Photos shared during a session, signed for inline display in the
+// conversation card (AC9, THOUG-132 Photo Walk).
+app.get('/api/sessions/:id/photos', requireFlag, async (req, res) => {
+  try {
+    res.json({ photos: await listSessionPhotos(req.params.id!) });
+  } catch (err) {
+    console.error('[sessions:photos]', err);
+    res.status(500).json({ error: 'failed to list session photos' });
+  }
+});
 
 // The Hume EVI 3 BYO-LLM endpoint. Hume's config points its custom language
 // model at this path; it streams OpenAI-compatible chat-completion chunks.

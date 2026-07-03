@@ -3,3 +3,4 @@ export * from './types.js';
 export * from './reverenceFilter.js';
 export * from './sethScaffold.js';
 export * from './flowEngine.js';
+export * from './personMatch.js';

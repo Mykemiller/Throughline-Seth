@@ -34,8 +34,8 @@ const photo = (over: Partial<PendingPhoto> = {}): PendingPhoto => ({
   ...over,
 });
 
-test('scaffold version is v0.3', () => {
-  assert.equal(SETH_SCAFFOLD_VERSION, '0.3.0');
+test('scaffold version is v0.4', () => {
+  assert.equal(SETH_SCAFFOLD_VERSION, '0.4.0');
 });
 
 test('no photo → prompt has no photo-series block', () => {

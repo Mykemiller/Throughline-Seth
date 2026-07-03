@@ -47,6 +47,19 @@ export async function createSession(): Promise<{ sessionId: string; snapshot: Se
     .eq('source', 'first_thread_voice')
     .eq('status', 'committed');
   if ((prior.count ?? 0) > 0) snapshot.nextSessionRecapPending = true;
+  // Photo Walk (AC8/D5): a declined chapter photo ask persists across
+  // sessions — carry the declined set forward from the most recent session.
+  const last = await db()
+    .from('rot_capture_sessions')
+    .select('state_snapshot')
+    .eq('subscriber_id', OWNER_SUBSCRIBER_ID)
+    .eq('entry_point', 'first_thread')
+    .order('started_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (last.data?.state_snapshot) {
+    snapshot.photoDeclinedChapters = reviveSnapshot(last.data.state_snapshot).photoDeclinedChapters;
+  }
   const { data, error } = await db()
     .from('rot_capture_sessions')
     .insert({
@@ -246,4 +259,65 @@ export async function insertMediaAsset(args: {
 export async function setAssetCaption(assetId: string, caption: string): Promise<void> {
   const { error } = await db().from('media_assets').update({ caption }).eq('asset_id', assetId);
   if (error) throw new Error(`setAssetCaption failed: ${error.message}`);
+}
+
+/** A photo shared during a session, with a short-lived signed URL for display. */
+export interface SessionPhoto {
+  assetId: string | null;
+  url: string;
+  caption: string | null;
+  createdAt: string;
+}
+
+/**
+ * Photos shared during a session, for the inline conversation-card display
+ * (AC9). Pinned assets are scoped by the session's start time (media_assets
+ * has no session column — single-owner prototype); photos still HELD in the
+ * snapshot (shared before any Moment) are included from their Storage URLs.
+ * The bucket is private, so each photo gets a short-lived signed URL.
+ */
+export async function listSessionPhotos(sessionId: string): Promise<SessionPhoto[]> {
+  const { data: sessionRow, error: sErr } = await db()
+    .from('rot_capture_sessions')
+    .select('started_at, subscriber_id, state_snapshot')
+    .eq('session_id', sessionId)
+    .single();
+  if (sErr || !sessionRow) return [];
+  const snapshot = reviveSnapshot(sessionRow.state_snapshot);
+
+  const { data: assets } = await db()
+    .from('media_assets')
+    .select('asset_id, storage_url, caption, created_at, rot_moments!inner(subscriber_id)')
+    .eq('asset_type', 'photo')
+    .eq('rot_moments.subscriber_id', sessionRow.subscriber_id as string)
+    .gte('created_at', sessionRow.started_at as string)
+    .order('created_at', { ascending: true });
+
+  const storage = db().storage;
+  const sign = async (storageUrl: string): Promise<string | null> => {
+    const slash = storageUrl.indexOf('/');
+    if (slash <= 0) return null;
+    const bucket = storageUrl.slice(0, slash);
+    const path = storageUrl.slice(slash + 1);
+    const { data } = await storage.from(bucket).createSignedUrl(path, 3600);
+    return data?.signedUrl ?? null;
+  };
+
+  const out: SessionPhoto[] = [];
+  for (const a of assets ?? []) {
+    const url = await sign(a.storage_url as string);
+    if (url) {
+      out.push({
+        assetId: a.asset_id as string,
+        url,
+        caption: (a.caption as string | null) ?? null,
+        createdAt: a.created_at as string,
+      });
+    }
+  }
+  for (const held of snapshot.heldPhotos) {
+    const url = await sign(held.storageUrl);
+    if (url) out.push({ assetId: null, url, caption: null, createdAt: sessionRow.started_at as string });
+  }
+  return out;
 }

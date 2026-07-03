@@ -124,7 +124,7 @@ test('reviveSnapshot upgrades a legacy v1 snapshot without losing closures', () 
     v: 1,
   };
   const revived = reviveSnapshot(legacy);
-  assert.equal(revived.v, 5);
+  assert.equal(revived.v, 6);
   assert.equal(revived.chapterId, 'first_light'); // unknown chapter → safe start
   assert.equal(revived.phase, 'walk'); // legacy session never replays the intro
   assert.equal(revived.closedScopes.length, 1);

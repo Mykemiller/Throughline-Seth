@@ -42,9 +42,13 @@ import {
   buildSethIntroPrompt,
   applyChapterComplete,
   applyIntroComplete,
+  classifyPersonMatch,
   clearDraft,
   clearHeldPhotos,
+  clearNameClarification,
+  clearPhotoAskAwaiting,
   countPhotoForRecap,
+  declinePhotoAsk,
   dequeuePhoto,
   closeScope,
   confirmedInChapter,
@@ -56,13 +60,23 @@ import {
   initialStateSnapshot,
   isOperationalReturn,
   markActivity,
+  markPhotoAsked,
+  markPhotoBeat,
   nextTurn,
+  personSummary,
+  photoBeatsComplete,
+  photoFocusTurns,
   recordNamedIdentities,
   resetPhotosSinceRecap,
+  resolveClarification,
   setActiveMoment,
+  setNameClarification,
   spendFollowUp,
   stageDraft,
+  suppressPeopleBeat,
   recordConfirmedMoment,
+  touchesClosedScope,
+  type PersonRecord,
   type ClmMessage,
   type ClmRequestBody,
   type SessionStateSnapshot,
@@ -83,6 +97,16 @@ import {
   writeAmbientMoment,
   writeAmbientStory,
 } from './riverWrites.js';
+import {
+  commitPendingPhotoPersons,
+  discardUnmatchedPhotoPerson,
+  fetchPersonRecords,
+  getUnmatchedPhotoPersons,
+  insertPhotoPerson,
+  promoteUnmatchedPhotoPerson,
+  resolvePhotoPerson,
+  updateMomentPlace,
+} from './photoWalk.js';
 
 /** 20 minutes in milliseconds — the time-based recap trigger. */
 const RECAP_INTERVAL_MS = 20 * 60 * 1000;
@@ -113,6 +137,34 @@ function latestSubscriberUtterance(messages: ClmMessage[]): string {
 function recapTimeElapsed(recapLastAt: string | null): boolean {
   if (!recapLastAt) return false; // no recap yet — we fire on chapter boundary first
   return Date.now() - new Date(recapLastAt).getTime() > RECAP_INTERVAL_MS;
+}
+
+/** Turns a photo may hold focus before the thread is released (stuck-thread valve). */
+const PHOTO_FOCUS_TURN_CAP = 14;
+
+/**
+ * REVERENCE DEAD-END TRIGGER (P0 ship gate) — deterministic, server-relay only.
+ * A name tied to the photo in focus (spoken, or resolved through the family
+ * record — including every candidate of an ambiguous match) is checked against
+ * the subscriber's closed scopes via exact token match. Model discretion plays
+ * no part. Leans toward reverence: ANY candidate touching a closed scope trips
+ * the suppression.
+ */
+function nameHitsClosedScope(
+  snapshot: SessionStateSnapshot,
+  name: string,
+  persons: PersonRecord[],
+): boolean {
+  if (touchesClosedScope(snapshot, name)) return true;
+  const match = classifyPersonMatch(name, persons);
+  const candidates = match.personId
+    ? persons.filter((p) => p.id === match.personId)
+    : match.candidates;
+  return candidates.some((p) => {
+    if (touchesClosedScope(snapshot, p.full_name)) return true;
+    const alts = Array.isArray(p.alt_names) ? p.alt_names : [];
+    return alts.some((a) => typeof a === 'string' && touchesClosedScope(snapshot, a));
+  });
 }
 
 export async function handleClmRequest(req: Request, res: Response): Promise<void> {
@@ -246,17 +298,28 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
       snapshot = { ...snapshot, nextSessionRecapPending: false };
     } else {
       // First utterance of the session — speak the next-session recap.
+      // Unmatched photo names left unresolved last session roll in here (the
+      // unmatched-name lifecycle never leaves rows in silent limbo).
       const priorMoments = await safe(() =>
         getPriorSessionMoments({ subscriberId, currentSessionId: sessionId }),
       ) ?? [];
-      if (priorMoments.length > 0) {
-        const recapText = buildNextSessionRecapPrompt(priorMoments);
+      const priorUnmatched = (await safe(() => getUnmatchedPhotoPersons(subscriberId))) ?? [];
+      if (priorMoments.length > 0 || priorUnmatched.length > 0) {
+        const recapText = buildNextSessionRecapPrompt(
+          priorMoments,
+          priorUnmatched.map((u) => u.displayName),
+        );
         sseChunk(res, recapText);
+        // The names ask needs a verdict — route the reply through the
+        // mid-session recap processor rather than the simple "carry on" path.
+        if (priorUnmatched.length > 0) {
+          snapshot = { ...snapshot, recapPending: true, nextSessionRecapPending: false };
+        }
         await safe(() =>
           appendExchange({
             sessionId,
             role: 'system',
-            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments`,
+            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments + ${priorUnmatched.length} unmatched photo names`,
           }),
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -275,6 +338,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
     const pendingRows = await safe(() =>
       getPendingReviewRows({ subscriberId, sessionId }),
     ) ?? [];
+    const unmatched = (await safe(() => getUnmatchedPhotoPersons(subscriberId))) ?? [];
 
     const verdict = detectConfirmation(utterance);
 
@@ -294,22 +358,44 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
           }),
         );
       }
+      // Unmatched-name lifecycle (HIGH fix): confirm PROMOTES each surfaced
+      // name into a stub family record (persons id 'stub_<uuid>') and commits
+      // the photo_persons rows — no silent limbo.
+      for (const u of unmatched) {
+        const promoted = await safe(() => promoteUnmatchedPhotoPerson(u));
+        if (promoted) {
+          await safe(() =>
+            appendExchange({
+              sessionId,
+              role: 'system',
+              content: `[recap/persons] promoted "${u.displayName}" → ${promoted.stubPersonId}`,
+            }),
+          );
+        }
+      }
+      await safe(() => commitPendingPhotoPersons(subscriberId));
       snapshot = { ...snapshot, recapPending: false };
     } else if (verdict === 'decline') {
       // Drop all pending rows (subscriber rejected the batch).
       for (const row of pendingRows) {
         await safe(() => dropPendingReview(row.momentId));
       }
+      // Discard the surfaced unmatched names (status='removed', never deleted).
+      for (const u of unmatched) {
+        await safe(() => discardUnmatchedPhotoPerson(u.photoPersonId));
+      }
       await safe(() =>
         appendExchange({
           sessionId,
           role: 'system',
-          content: `[recap] subscriber declined batch — dropped ${pendingRows.length} pending_review rows`,
+          content: `[recap] subscriber declined batch — dropped ${pendingRows.length} pending_review rows, discarded ${unmatched.length} unmatched photo names`,
         }),
       );
       snapshot = { ...snapshot, recapPending: false };
     }
-    // 'unclear' → leave recapPending=true; Seth re-asks gently via prompt context.
+    // 'unclear' → leave recapPending=true; Seth re-asks gently via prompt
+    // context. Unmatched names left unresolved at session end simply roll into
+    // the next session's recap (consistent with the ambient write model).
   }
 
   // ── 5. Mid-session recap trigger check ───────────────────────────────────
@@ -324,10 +410,14 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
       const pendingRows = await safe(() =>
         getPendingReviewRows({ subscriberId, sessionId }),
       ) ?? [];
+      const unmatched = (await safe(() => getUnmatchedPhotoPersons(subscriberId))) ?? [];
       const reason = chapterBoundary ? 'chapter boundary' : softCap ? 'photo soft cap' : '20-min elapsed';
 
-      if (pendingRows.length > 0) {
-        const recapText = buildMidSessionRecapPrompt(pendingRows);
+      if (pendingRows.length > 0 || unmatched.length > 0) {
+        const recapText = buildMidSessionRecapPrompt(
+          pendingRows,
+          unmatched.map((u) => u.displayName),
+        );
         sseChunk(res, recapText);
         snapshot = { ...snapshot, recapPending: true };
         // Reset the photo counter so the soft cap doesn't re-fire every turn.
@@ -337,7 +427,7 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
           appendExchange({
             sessionId,
             role: 'system',
-            content: `[recap] ${reason} — surfaced ${pendingRows.length} pending_review rows for confirmation`,
+            content: `[recap] ${reason} — surfaced ${pendingRows.length} pending_review rows + ${unmatched.length} unmatched photo names for confirmation`,
           }),
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -354,7 +444,99 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
 
   // Capture any subscriber-supplied names this turn for intra-session reuse (D).
   // Deterministic + high-precision; Seth still never invents an identity.
-  snapshot = recordNamedIdentities(snapshot, extractNamedIdentities(utterance), snapshot.turn);
+  const parsedNames = extractNamedIdentities(utterance);
+  snapshot = recordNamedIdentities(snapshot, parsedNames, snapshot.turn);
+
+  // The family record, fetched lazily — only when a name needs checking.
+  let personsCache: PersonRecord[] | null = null;
+  const getPersons = async (): Promise<PersonRecord[]> => {
+    if (personsCache) return personsCache;
+    personsCache = (await safe(() => fetchPersonRecords())) ?? [];
+    return personsCache;
+  };
+
+  // ── 5b. REVERENCE DEAD-END TRIGGER (P0) — BEFORE any Beat-3 prompting ─────
+  // Deterministic pre-filter on the server relay: names spoken while a photo
+  // is in focus are cross-referenced (with their family-record matches, every
+  // ambiguous candidate included) against the closed scopes. On a hit, the
+  // who's-in-it beat is bypassed entirely for this photo — no acknowledgment,
+  // no near-miss phrasing — and Seth pivots to the remaining beats as if it
+  // completed. The suppressed name is audit-marked in photo_persons as
+  // status='removed' (the store's system-reviewed terminal state; it never
+  // surfaces in any recap).
+  if (snapshot.pendingPhoto && !snapshot.pendingPhoto.peopleSuppressed && parsedNames.length > 0) {
+    const persons = await getPersons();
+    for (const name of parsedNames) {
+      if (nameHitsClosedScope(snapshot, name, persons)) {
+        const assetId = snapshot.pendingPhoto.assetId;
+        snapshot = suppressPeopleBeat(snapshot);
+        snapshot = clearNameClarification(snapshot);
+        if (subscriberId) {
+          await safe(() =>
+            insertPhotoPerson({
+              subscriberId,
+              assetId,
+              personId: null,
+              displayName: name,
+              matchConfidence: 'unmatched',
+              status: 'removed',
+            }),
+          );
+        }
+        if (sessionId) {
+          await safe(() =>
+            appendExchange({
+              sessionId,
+              role: 'system',
+              content: `[reverence/photo] who's-in-it beat suppressed for asset ${assetId} (closed-scope match)`,
+            }),
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  // ── 5c. One-and-done name clarification resolution (D4) ──────────────────
+  // Runs only once the question has actually been asked (askedTurn > 0, a
+  // prior turn); this utterance is its answer. Resolved or not, the
+  // clarification ends here — an unsettled name stays 'ambiguous'.
+  if (
+    snapshot.pendingNameClarification &&
+    snapshot.pendingNameClarification.askedTurn > 0 &&
+    snapshot.turn > snapshot.pendingNameClarification.askedTurn
+  ) {
+    const clarification = snapshot.pendingNameClarification;
+    const persons = await getPersons();
+    const candidates = persons.filter((p) => clarification.candidateIds.includes(p.id));
+    const resolved = resolveClarification(utterance, candidates);
+    if (resolved && snapshot.pendingPhoto && nameHitsClosedScope(snapshot, resolved.full_name, persons)) {
+      // The clarified person is behind a closed door — dead end, silently.
+      snapshot = suppressPeopleBeat(snapshot);
+    } else if (resolved && clarification.photoPersonId) {
+      await safe(() => resolvePhotoPerson(clarification.photoPersonId!, resolved.id));
+      if (sessionId) {
+        await safe(() =>
+          appendExchange({
+            sessionId,
+            role: 'system',
+            content: `[photo/persons] "${clarification.displayName}" resolved → ${resolved.id}`,
+          }),
+        );
+      }
+    }
+    snapshot = clearNameClarification(snapshot);
+  }
+
+  // ── 5d. Once-per-chapter photo ask lifecycle (AC8) ────────────────────────
+  // Armed on chapter entry; consumed here so the ask lands early. If photos
+  // are already flowing, the ask's purpose is met — consume it silently.
+  const photosInFlight = Boolean(snapshot.pendingPhoto) || snapshot.heldPhotos.length > 0;
+  const photoAskDue = snapshot.photoAskPending && !photosInFlight;
+  if (snapshot.photoAskPending && photosInFlight) {
+    snapshot = { ...markPhotoAsked(snapshot), photoAskAwaitingReply: false };
+  }
+  const photoAskAwaiting = !photoAskDue && snapshot.photoAskAwaitingReply;
 
   // ── 6. Claude speaks Seth's turn ──────────────────────────────────────────
   const systemPrompt = buildSethSystemPrompt({
@@ -371,7 +553,26 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
     namedIdentities: snapshot.namedIdentities,
     confirmedInChapter: confirmedInChapter(snapshot),
     recapPending: snapshot.recapPending,
+    photoAskPending: photoAskDue,
+    photoAskAwaitingReply: photoAskAwaiting,
+    // The clarify instruction rides exactly one prompt: the turn it's armed.
+    nameClarification:
+      snapshot.pendingNameClarification && snapshot.pendingNameClarification.askedTurn === 0
+        ? snapshot.pendingNameClarification
+        : null,
   });
+  // The ask is in this turn's prompt — never again this chapter; the next
+  // reply is read for a decline (one-shot).
+  if (photoAskDue) snapshot = markPhotoAsked(snapshot);
+  else if (photoAskAwaiting) snapshot = clearPhotoAskAwaiting(snapshot);
+  // The clarifying question goes out this turn — stamp it so the NEXT reply
+  // is read as its answer (5c) and it is never asked twice.
+  if (snapshot.pendingNameClarification && snapshot.pendingNameClarification.askedTurn === 0) {
+    snapshot = setNameClarification(snapshot, {
+      ...snapshot.pendingNameClarification,
+      askedTurn: snapshot.turn,
+    });
+  }
 
   try {
     const result = await generateSethTurn({
@@ -469,8 +670,12 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
           break;
         }
         case 'story_draft': {
-          // AMBIENT WRITE — same as moment_draft above.
+          // AMBIENT WRITE — same as moment_draft above. A story told over the
+          // photo in focus covers the MEMORIES beat (AC10) and is tagged
+          // ['photo_walk'] so the session-close orphan check can find it; the
+          // photo itself stays in focus until all three beats are touched.
           if (subscriberId && sessionId) {
+            const wasPhotoStory = Boolean(snapshot.pendingPhoto);
             const anchorId = snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId ?? null;
             const written = await safe(() =>
               writeAmbientStory({
@@ -479,12 +684,11 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
                 draft: result.payload as any,
                 turn: snapshot.turn,
                 anchorMomentId: anchorId,
+                clusterTags: wasPhotoStory ? ['photo_walk'] : [],
               }),
             );
-            if (written && snapshot.pendingPhoto) {
-              // Photo's story captured → bring the next queued photo into focus
-              // (or clear if the batch is drained).
-              snapshot = dequeuePhoto(snapshot);
+            if (written && wasPhotoStory) {
+              snapshot = markPhotoBeat(snapshot, 'memories');
             }
             if (written) {
               await safe(() =>
@@ -499,6 +703,136 @@ export async function handleClmRequest(req: Request, res: Response): Promise<voi
           snapshot = stageDraft(snapshot, result.payload);
           break;
         }
+        case 'photo_ask_outcome': {
+          // AC8/D5 — chapter-scoped suppression only; never a Reverence closure.
+          snapshot = declinePhotoAsk(snapshot);
+          if (sessionId) {
+            await safe(() =>
+              appendExchange({
+                sessionId,
+                role: 'system',
+                content: `[photo/ask] declined for chapter ${snapshot.chapterId} — suppressed for this chapter (not a closed topic)`,
+              }),
+            );
+          }
+          break;
+        }
+        case 'photo_details': {
+          const details = result.payload;
+          const photo = snapshot.pendingPhoto;
+          if (!photo) break;
+
+          // Time & place beat — free-text place onto the anchor Moment (D2).
+          if (details.whenText || details.placeText) {
+            snapshot = markPhotoBeat(snapshot, 'timePlace');
+            if (details.placeText) {
+              await safe(() => updateMomentPlace(photo.momentId, details.placeText!));
+            }
+          }
+
+          // Who's-in-it beat — match against the family record (AC11), with
+          // the Dead-End Trigger re-checked on every name (P0).
+          if (details.noPeople) {
+            snapshot = markPhotoBeat(snapshot, 'people');
+          }
+          if (details.personNames && !snapshot.pendingPhoto?.peopleSuppressed) {
+            const persons = await getPersons();
+            for (const spoken of details.personNames) {
+              if (nameHitsClosedScope(snapshot, spoken, persons)) {
+                snapshot = suppressPeopleBeat(snapshot);
+                snapshot = clearNameClarification(snapshot);
+                if (subscriberId) {
+                  await safe(() =>
+                    insertPhotoPerson({
+                      subscriberId,
+                      assetId: photo.assetId,
+                      personId: null,
+                      displayName: spoken,
+                      matchConfidence: 'unmatched',
+                      status: 'removed',
+                    }),
+                  );
+                }
+                if (sessionId) {
+                  await safe(() =>
+                    appendExchange({
+                      sessionId,
+                      role: 'system',
+                      content: `[reverence/photo] who's-in-it beat suppressed for asset ${photo.assetId} (closed-scope match)`,
+                    }),
+                  );
+                }
+                break;
+              }
+              const match = classifyPersonMatch(spoken, persons);
+              if (subscriberId) {
+                const row = await safe(() =>
+                  insertPhotoPerson({
+                    subscriberId,
+                    assetId: photo.assetId,
+                    personId: match.personId,
+                    displayName: spoken,
+                    matchConfidence: match.confidence,
+                  }),
+                );
+                // D4 — arm the ONE clarifying question for the first ambiguous
+                // name (one clarification in flight at a time; the rest stay
+                // 'ambiguous' rather than queueing an interrogation).
+                if (
+                  row &&
+                  match.confidence === 'ambiguous' &&
+                  !snapshot.pendingNameClarification
+                ) {
+                  snapshot = setNameClarification(snapshot, {
+                    displayName: spoken,
+                    photoPersonId: row.photoPersonId,
+                    candidateIds: match.candidates.map((c) => c.id),
+                    candidateSummaries: match.candidates.slice(0, 3).map(personSummary),
+                    askedTurn: 0,
+                  });
+                }
+                if (sessionId) {
+                  await safe(() =>
+                    appendExchange({
+                      sessionId,
+                      role: 'system',
+                      content: `[photo/persons] "${spoken}" → ${match.confidence}${match.personId ? ` (${match.personId})` : ''} on asset ${photo.assetId}`,
+                    }),
+                  );
+                }
+              }
+              snapshot = markPhotoBeat(snapshot, 'people');
+            }
+          }
+
+          // The model attests all beats were touched — release the photo.
+          if (details.threadComplete) {
+            snapshot = markPhotoBeat(snapshot, 'memories');
+            snapshot = markPhotoBeat(snapshot, 'timePlace');
+            snapshot = markPhotoBeat(snapshot, 'people');
+          }
+          break;
+        }
+      }
+    }
+
+    // ── 7b. Photo thread closure (AC10) ────────────────────────────────────
+    // The photo releases when all three beats are touched (a suppressed
+    // people beat counts), or after the safety-valve turn cap so a thread can
+    // never wedge the session. Dequeue brings the next batch photo into focus.
+    if (snapshot.pendingPhoto) {
+      const stuck = photoFocusTurns(snapshot) > PHOTO_FOCUS_TURN_CAP;
+      if (photoBeatsComplete(snapshot) || stuck) {
+        if (stuck && sessionId) {
+          await safe(() =>
+            appendExchange({
+              sessionId,
+              role: 'system',
+              content: `[photo] focus released by turn cap for asset ${snapshot.pendingPhoto!.assetId} (beats incomplete)`,
+            }),
+          );
+        }
+        snapshot = dequeuePhoto(snapshot);
       }
     }
 

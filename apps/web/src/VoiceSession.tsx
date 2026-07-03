@@ -2,7 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { VoiceProvider, useVoice } from '@humeai/voice-react';
 import type { SessionStateSnapshot } from '@throughline/shared';
 import { CHAPTER_ORDER } from '@throughline/shared';
-import { createSession, fetchHumeToken, fetchResumable, fetchSessionState, setChapter, setSessionStatus } from './api';
+import {
+  createSession,
+  fetchHumeToken,
+  fetchResumable,
+  fetchSessionPhotos,
+  fetchSessionState,
+  setChapter,
+  setSessionStatus,
+  type SessionPhoto,
+} from './api';
 import { diag } from './diagnostics';
 import { useTranscriptPersistence } from './useTranscriptPersistence';
 import { PhotoCapture } from './PhotoCapture';
@@ -126,9 +135,25 @@ function SethPanel({
 }) {
   const { connect, disconnect, status, isMuted, mute, unmute, messages } = useVoice();
   const [snapshot, setSnapshot] = useState(initialSnapshot);
+  // Every photo shared this session, rendered inline in the conversation card
+  // (AC9). Signed URLs from the server; refreshed after each upload.
+  const [sessionPhotos, setSessionPhotos] = useState<SessionPhoto[]>([]);
 
   const connected = status.value === 'connected';
   const connecting = status.value === 'connecting';
+
+  const refreshPhotos = useCallback(async () => {
+    try {
+      setSessionPhotos(await fetchSessionPhotos(sessionId));
+    } catch (e) {
+      diag.error('photos.list.error', { message: (e as Error).message });
+    }
+  }, [sessionId]);
+
+  // Load any photos already shared (resume) once on mount.
+  useEffect(() => {
+    void refreshPhotos();
+  }, [refreshPhotos]);
 
   // Track the last flow-state signature so we log on CHANGE, not every poll.
   const lastSig = useRef<string>('');
@@ -273,8 +298,29 @@ function SethPanel({
         <PhotoCapture
           sessionId={sessionId}
           hasActiveMoment={Boolean(snapshot.activeMomentId)}
-          onPinned={() => void refreshState()}
+          onPinned={() => {
+            void refreshState();
+            void refreshPhotos();
+          }}
         />
+      )}
+
+      {sessionPhotos.length > 0 && (
+        <div className="ft-photos-inline" aria-label="Photographs shared in this conversation">
+          {sessionPhotos.map((p, i) => (
+            <figure key={p.assetId ?? `held-${i}`} className="ft-photos-inline__item">
+              <img
+                className="ft-photos-inline__img"
+                src={p.url}
+                alt={p.caption ?? 'A photograph shared in this conversation'}
+                loading="lazy"
+              />
+              {p.caption && (
+                <figcaption className="ft-photos-inline__caption">{p.caption}</figcaption>
+              )}
+            </figure>
+          ))}
+        </div>
       )}
 
       <ol className="ft-transcript">
