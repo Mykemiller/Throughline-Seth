@@ -92,3 +92,19 @@ export async function uploadPhoto(args: {
     }),
   );
 }
+
+/** A photo shared during this session, signed for inline display (AC9). */
+export interface SessionPhoto {
+  assetId: string | null;
+  url: string;
+  caption: string | null;
+  createdAt: string;
+}
+
+/** Every photo shared this session — rendered inline in the conversation card. */
+export async function fetchSessionPhotos(sessionId: string): Promise<SessionPhoto[]> {
+  const { photos } = await json<{ photos: SessionPhoto[] }>(
+    await fetch(`/api/sessions/${sessionId}/photos`),
+  );
+  return photos;
+}

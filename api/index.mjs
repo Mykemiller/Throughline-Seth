@@ -193,10 +193,10 @@ function tokensForTopic(text) {
   return out;
 }
 function topicFromUtterance(utterance, matchedPhrase) {
-  const norm = normalizeForReverence(utterance).replace(/'/g, "");
+  const norm2 = normalizeForReverence(utterance).replace(/'/g, "");
   const phrase = normalizeForReverence(matchedPhrase).replace(/'/g, "");
-  const idx = norm.indexOf(phrase);
-  const tail = idx >= 0 ? norm.slice(idx + phrase.length) : norm;
+  const idx = norm2.indexOf(phrase);
+  const tail = idx >= 0 ? norm2.slice(idx + phrase.length) : norm2;
   return tokensForTopic(tail);
 }
 
@@ -343,7 +343,12 @@ function initialStateSnapshot() {
     lastActivityAt: null,
     namedIdentities: [],
     heldPhotos: [],
-    v: 5
+    photoDeclinedChapters: [],
+    photoAskedChapters: [],
+    photoAskPending: false,
+    photoAskAwaitingReply: false,
+    pendingNameClarification: null,
+    v: 6
   };
 }
 var SETH_VOICE_AND_GUARDRAILS = `You are Seth, a warm, unhurried, historically literate First Thread Companion.
@@ -352,10 +357,17 @@ First Light \u2192 The School Years \u2192 Becoming \u2192 The World You Built \
 
 Turn discipline (bounded latitude \u2014 this is what makes you trustworthy):
 - ONE question per turn. Never two.
-- Exactly ONE bounded follow-up per chapter on a detail the person gives you, then back to the spine.
+- Exactly ONE bounded follow-up per chapter on a detail the person gives you, then back to the spine. After the person answers, at most one follow-up \u2014 then move the thread forward.
 - Carry one concrete detail across each chapter transition; never use menus, modals, or progress language.
 - Follow the thread, not the form: a smell \u2192 ask about the smell; a name \u2192 ask about the person; a place \u2192 ask where exactly. The depth of one memory is worth more than the breadth of ten.
 - Long, contemplative pauses are normal and welcome. Never rush a silence.
+
+Pacing (v0.3 \u2014 you talk LESS; this is measured):
+- This is their story hour, not yours. They should do at least three-quarters of the talking.
+- Most turns: a short warm beat plus one question \u2014 aim for UNDER 22 words. A turn should almost never pass 40 words, and NEVER 70, except a chapter opening or a recap.
+- Chapter openings: ONE warm sentence, then the opening question. Not a paragraph.
+- Do NOT re-summarize or restate what the person just told you mid-chapter. No "so what I'm hearing is\u2026", no replaying their story back at them. Reflection lives in the recap, nowhere else. A word or two of warmth ("A coal stove \u2014 I can smell it."), then your question.
+- Cut preambles ("that's wonderful, thank you so much for sharing that\u2026"). Warmth is in brevity and attention, not word count.
 
 Non-negotiable rules:
 - REVERENCE (P0): on any closed-door signal ("I'd rather not", "we don't talk about that", a long silence after a tender prompt), give exactly ONE gentle acknowledgment \u2014 "We can leave that chapter as it is." \u2014 never ask how or when, and never re-approach that topic, person, or period again, this session or any future one. A deterministic pre-filter also enforces this before you ever see the turn; honor subtler cues yourself. Treat a tender-moment silence as a closed door, not a gap to fill.
@@ -428,20 +440,43 @@ AWAITING CONFIRMATION: you proposed "${ctx.pendingDraft.payload.title}" for the 
   const batchNote = queued > 0 ? `
 
 BEAT 0b \u2014 BATCH: the person handed you several photographs at once \u2014 ${queued} more ${queued === 1 ? "is" : "are"} waiting after this one. Acknowledge the whole handful warmly and make clear you'll take them one at a time, unhurried; do NOT describe them all at once or rush. Begin with THIS one, and the others will come to you in turn.` : "";
+  const beats = ctx.pendingPhoto?.beats;
+  const peopleSuppressed = ctx.pendingPhoto?.peopleSuppressed === true;
+  const openBeats = [];
+  if (beats && !beats.memories) openBeats.push("the MEMORY (what was happening, the story of it)");
+  if (beats && !beats.timePlace) openBeats.push("TIME & PLACE (when and where this was)");
+  if (beats && !beats.people && !peopleSuppressed) openBeats.push("WHO'S IN IT (only if they name people \u2014 never you)");
+  const beatsNote = !beats ? "" : openBeats.length > 0 ? `
+  STILL OPEN for this photo: ${openBeats.join(" \xB7 ")}. Let THEM set the order \u2014 follow whatever they offer first; one open question at a time, never a checklist read aloud. When all of it has been touched (a gentle "no" or a shrug counts as touched \u2014 offered is covered), call the tool with kind:"photo_details" and threadComplete:true so the app lets this picture rest.` : `
+  Every beat of this photo has been touched. Let it rest warmly \u2014 invite another photograph lightly or carry the chapter forward; call the tool with kind:"photo_details", threadComplete:true if you haven't.`;
+  const peopleBeatLine = peopleSuppressed ? `
+Do NOT ask who is in this photograph, do not invite naming anyone in it, and let any people in it pass entirely without comment \u2014 talk about the place, the time, and the memory instead. Never explain or hint at why.` : `
+WHO'S IN IT: if they name someone in the picture, receive the name warmly and record it via the tool (kind:"photo_details", personNames:[\u2026], their exact words). If they indicate there's no one to name or they'd rather not, record kind:"photo_details" with noPeople:true and let it be.`;
+  const detailsCapture = `
+CAPTURE (tool channel, never spoken): as they place the photo in time or place, record it via kind:"photo_details" (whenText / placeText, their words). Names they give for people IN the photo ride personNames. This is bookkeeping \u2014 never narrate it.`;
   const photo = !ctx.pendingPhoto ? "" : photoUnsure ? batchNote + `
 
 An image was just added, but it did NOT read as a clear family photograph \u2014 it may be a screenshot, a document, a meme, or it was too blurry or unclear to make out. Do NOT invent a description or a memory around it. THIS turn, in your own warm spoken words: gently name that you're having a little trouble seeing it clearly, and ask if they meant to share a different picture (e.g. "Hmm, I'm having trouble making this one out \u2014 it looks like it might be a screenshot. Did you mean to share a different picture with me?"). Don't ask a memory question about it, and describe nothing you can't see. If they say to skip it, set it aside warmly and move on without pressure.` : batchNote + `
 
-A PHOTOGRAPH was just added to the Moment you're discussing, and you can see it now. Walk it through the photo-series beats this turn, in your own warm, spoken words:
+A PHOTOGRAPH is in focus on the Moment you're discussing, and you can see it. Walk it through the photo beats in your own warm, spoken words \u2014 short turns; the pacing rules hold here too:
 ` + (ctx.pendingPhoto.description ? `  BEAT 0 \u2014 VALIDITY: here is a grounded note on what is visible \u2014 ${ctx.pendingPhoto.description} If this reads as a real family photograph, continue. If it instead looks like a screenshot, a document, a meme, or is too blurry or unclear to make out, do NOT invent a memory around it \u2014 warmly name that you're having a little trouble seeing it and ask if they meant to share a different picture, then stop there for this turn.
 ` : `  BEAT 0 \u2014 VALIDITY: you could not make out this image's details this time. Invent nothing. Acknowledge the photograph warmly, and if it may not have come through cleanly, gently ask whether they'd like to try again or show a different one.
-`) + `  BEAT 1 \u2014 ACKNOWLEDGE & DESCRIBE: tell them plainly the picture came through and that you can see it, then note ONLY what is literally visible \u2014 light, setting, objects, the feeling of the scene. Propose, never assert ("this looks like it might be\u2026").${photoWhenHint}
-  BEAT 2 \u2014 ELICIT ONE DETAIL (MANDATORY for every photo): before you move on from THIS picture \u2014 to another photo or to closing \u2014 ask exactly ONE open-ended question inviting them to elaborate on it ("what was happening here?", "tell me about this one", "what do you see when you look at it now?"). Never a yes/no, never stacked. This open invitation is required for every photo; the only thing that excuses skipping it is a closed-door signal.
-Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.
+`) + `  BEAT 1 \u2014 ACKNOWLEDGE & DESCRIBE (first encounter only, briefly): the picture came through and you can see it; note ONLY what is literally visible. Propose, never assert ("this looks like it might be\u2026").${photoWhenHint}
+  BEAT 2 \u2014 ELICIT ONE DETAIL (MANDATORY for every photo): before you move on from THIS picture \u2014 to another photo or to closing \u2014 ask exactly ONE open-ended question inviting them to elaborate on it ("what was happening here?", "tell me about this one", "what do you see when you look at it now?"). Never a yes/no, never stacked. This open invitation is required for every photo; the only thing that excuses skipping it is a closed-door signal.${beatsNote}
+Hard limits: NEVER name or identify anyone in the picture, NEVER guess relationships, NEVER invent a backstory or a date. The people and the story are theirs to tell, not yours to supply.${peopleBeatLine}${detailsCapture}
 INTRA-SESSION IDENTITY: the "never name people" rule guards against you INVENTING an identity \u2014 it is not amnesia. If earlier in THIS conversation they already named someone ("that's my dad, Arthur"), you may gently reuse that name when the same person plausibly reappears ("is that Arthur again?") \u2014 offered as an observation open to correction, never as a hard claim, and never extended to anyone they haven't named themselves.${knownNamesNote}
 BEAT 3 \u2014 RECEIVE AMBIENTLY: when they tell you about it, take whatever they give \u2014 a story, a single word, or nothing \u2014 and let it be enough. Mirror lightly, in their words. Do NOT echo the same way every photo: rotate your move and never repeat it back-to-back \u2014 VALIDATE (lightly mirror their words) / SYNTHESIZE (tie this photo to an earlier one from this session) / ACKNOWLEDGE & CLEAR (let a phrase breathe, no echo, then the next question). When something concrete is worth keeping, emit a story_draft via the tool (their words, grounded) \u2014 never narrate the save.
 If they decline or fall silent in the moment, honor it (Reverence): one gentle acknowledgment, the photo still attaches with no commentary, and you move on without a flicker of pressure.`;
   const held = !ctx.pendingPhoto ? heldPhotoAcknowledgment(ctx.heldPhoto) : "";
+  const photoAsk = ctx.photoAskPending && !ctx.pendingPhoto ? `
+
+PHOTO INVITATION (once this chapter, THIS turn): after receiving what they just said, warmly weave in this chapter's one photo invitation \u2014 "Do you have any photographs from this time you'd like to share?" \u2014 as your question for the turn. Make "no" as easy as "yes"; never press. You will not ask again this chapter.` : "";
+  const photoAskReply = ctx.photoAskAwaitingReply && !ctx.photoAskPending && !ctx.pendingPhoto ? `
+
+You invited a photograph from this time last turn. If this reply declines it (no photos, not now, rather not), accept warmly in a few words and carry the thread on \u2014 AND call the tool with kind:"photo_ask_outcome", outcome:"declined" (never spoken; the app won't ask again this chapter). If they're up for it, tell them simply they can add it whenever they're ready, and carry on \u2014 the picture will come to you when it arrives.` : "";
+  const clarify = ctx.nameClarification ? `
+
+NAME CLARIFICATION (one question, once): they mentioned "${ctx.nameClarification.displayName}", and the family record holds more than one \u2014 ${ctx.nameClarification.candidateSummaries.join("; ")}. THIS turn, ask ONE gentle clarifying question to tell which one they mean (e.g. "Is that ${ctx.nameClarification.candidateSummaries[0]}?" or ask what makes this one theirs). Whatever they answer, take it and move on \u2014 never a second clarifying question; an unsettled name is fine.` : "";
   const completeness = ctx.confirmedInChapter > 0 && ctx.followUpSpent ? `
 
 This chapter has a confirmed Moment. When it feels complete, emit chapter_complete via the tool (with a carryDetail) and speak the transition into the next chapter, carrying: ${chapter.transitionCarry}.` : `
@@ -450,10 +485,10 @@ A chapter is complete when at least one Moment is confirmed \u2014 never forced.
   return `${SETH_VOICE_AND_GUARDRAILS}${nameLine}
 
 Current chapter: ${chapter.title} (${chapter.era} \xB7 ${chapter.session === "core" ? "Core Session" : "Depth Session"}).
-Chapter opening (use this wording when opening the chapter): "${chapter.openingPrompt}"
+Chapter opening (when opening the chapter: ONE warm sentence, then exactly this question): "${chapter.openingPrompt}"
 Primary trigger: ${chapter.primaryTrigger}.
 Nuclear episode focus: ${chapter.nuclearFocus.length ? chapter.nuclearFocus.join(", ") : "present-moment anchor"}.${chapter.extraGuidance ? `
-${chapter.extraGuidance}` : ""}${reentry}${followUp}${closed}${carry2}${confirm}${recap}${held}${photo}${completeness}
+${chapter.extraGuidance}` : ""}${reentry}${followUp}${closed}${carry2}${confirm}${recap}${held}${photo}${photoAsk}${photoAskReply}${clarify}${completeness}
 
 Speak as Seth for this turn. If \u2014 and only if \u2014 the person has shared something concrete worth preserving,
 also call the record_first_thread_payload tool with a grounded draft. Do not mention the tool aloud.`;
@@ -492,7 +527,12 @@ function reviveSnapshot(raw) {
     photosSinceRecap: typeof o.photosSinceRecap === "number" ? o.photosSinceRecap : 0,
     lastActivityAt: typeof o.lastActivityAt === "string" ? o.lastActivityAt : null,
     namedIdentities: Array.isArray(o.namedIdentities) ? o.namedIdentities : [],
-    heldPhotos: Array.isArray(o.heldPhotos) ? o.heldPhotos : []
+    heldPhotos: Array.isArray(o.heldPhotos) ? o.heldPhotos : [],
+    photoDeclinedChapters: Array.isArray(o.photoDeclinedChapters) ? o.photoDeclinedChapters.filter((c) => CHAPTER_ORDER.includes(c)) : [],
+    photoAskedChapters: Array.isArray(o.photoAskedChapters) ? o.photoAskedChapters.filter((c) => CHAPTER_ORDER.includes(c)) : [],
+    photoAskPending: Boolean(o.photoAskPending),
+    photoAskAwaitingReply: Boolean(o.photoAskAwaitingReply),
+    pendingNameClarification: o.pendingNameClarification ?? null
   };
 }
 function nextTurn(snapshot) {
@@ -511,28 +551,28 @@ function advanceChapter(snapshot) {
   if (!canAdvance(snapshot)) return snapshot;
   const idx = CHAPTER_ORDER.indexOf(snapshot.chapterId);
   const next = CHAPTER_ORDER[idx + 1];
-  return { ...snapshot, chapterId: next, followUpSpent: false };
+  return armPhotoAsk({ ...snapshot, chapterId: next, followUpSpent: false });
 }
 function applyIntroComplete(snapshot, payload) {
   const name = payload.name?.trim();
-  return {
+  return armPhotoAsk({
     ...snapshot,
     phase: "walk",
     subscriberName: name ? name : snapshot.subscriberName,
     chapterId: snapshot.phase === "intro" ? CHAPTER_ORDER[0] : snapshot.chapterId,
     followUpSpent: false
-  };
+  });
 }
 function jumpToChapter(snapshot, target) {
   if (!CHAPTER_ORDER.includes(target)) return snapshot;
   if (snapshot.phase === "walk" && target === snapshot.chapterId) return snapshot;
-  return {
+  return armPhotoAsk({
     ...snapshot,
     phase: "walk",
     chapterId: target,
     followUpSpent: false,
     pendingDraft: null
-  };
+  });
 }
 function applyChapterComplete(snapshot, payload) {
   if (payload.chapterId !== snapshot.chapterId) return snapshot;
@@ -559,6 +599,16 @@ function closeScope(snapshot, phrase, closedAt = (/* @__PURE__ */ new Date()).to
   };
   return { ...snapshot, closedScopes: [...snapshot.closedScopes, scope] };
 }
+function touchesClosedScope(snapshot, text) {
+  if (!text) return null;
+  const tokens = new Set(tokensForTopic(text));
+  for (const scope of snapshot.closedScopes) {
+    for (const t of scope.matchTokens) {
+      if (tokens.has(t)) return scope;
+    }
+  }
+  return null;
+}
 function stageDraft(snapshot, payload) {
   return { ...snapshot, pendingDraft: { payload, stagedAtTurn: snapshot.turn } };
 }
@@ -579,12 +629,18 @@ function recordConfirmedMoment(snapshot, momentId) {
   };
 }
 function enqueuePhoto(snapshot, photo) {
-  if (!snapshot.pendingPhoto) return { ...snapshot, pendingPhoto: photo };
-  return { ...snapshot, photoQueue: [...snapshot.photoQueue, photo] };
+  const prepared = {
+    beats: { memories: false, timePlace: false, people: false },
+    ...photo,
+    focusedAtTurn: photo.focusedAtTurn ?? snapshot.turn
+  };
+  if (!snapshot.pendingPhoto) return { ...snapshot, pendingPhoto: prepared };
+  return { ...snapshot, photoQueue: [...snapshot.photoQueue, prepared] };
 }
 function dequeuePhoto(snapshot) {
   const [next, ...rest] = snapshot.photoQueue;
-  return { ...snapshot, pendingPhoto: next ?? null, photoQueue: rest };
+  const focused = next ? { ...next, focusedAtTurn: snapshot.turn } : null;
+  return { ...snapshot, pendingPhoto: focused, photoQueue: rest };
 }
 function holdPhoto(snapshot, held) {
   return { ...snapshot, heldPhotos: [...snapshot.heldPhotos, held] };
@@ -592,6 +648,66 @@ function holdPhoto(snapshot, held) {
 function clearHeldPhotos(snapshot) {
   if (snapshot.heldPhotos.length === 0) return snapshot;
   return { ...snapshot, heldPhotos: [] };
+}
+function armPhotoAsk(snapshot) {
+  const eligible = !snapshot.photoAskedChapters.includes(snapshot.chapterId) && !snapshot.photoDeclinedChapters.includes(snapshot.chapterId);
+  if (snapshot.photoAskPending === eligible) return snapshot;
+  return { ...snapshot, photoAskPending: eligible };
+}
+function markPhotoAsked(snapshot) {
+  const asked = snapshot.photoAskedChapters.includes(snapshot.chapterId) ? snapshot.photoAskedChapters : [...snapshot.photoAskedChapters, snapshot.chapterId];
+  return {
+    ...snapshot,
+    photoAskPending: false,
+    photoAskAwaitingReply: true,
+    photoAskedChapters: asked
+  };
+}
+function clearPhotoAskAwaiting(snapshot) {
+  if (!snapshot.photoAskAwaitingReply) return snapshot;
+  return { ...snapshot, photoAskAwaitingReply: false };
+}
+function declinePhotoAsk(snapshot) {
+  const declined = snapshot.photoDeclinedChapters.includes(snapshot.chapterId) ? snapshot.photoDeclinedChapters : [...snapshot.photoDeclinedChapters, snapshot.chapterId];
+  return {
+    ...snapshot,
+    photoAskPending: false,
+    photoAskAwaitingReply: false,
+    photoDeclinedChapters: declined
+  };
+}
+var NO_BEATS = { memories: false, timePlace: false, people: false };
+function photoBeats(snapshot) {
+  return snapshot.pendingPhoto?.beats ?? NO_BEATS;
+}
+function markPhotoBeat(snapshot, beat) {
+  if (!snapshot.pendingPhoto) return snapshot;
+  const beats = { ...photoBeats(snapshot), [beat]: true };
+  return { ...snapshot, pendingPhoto: { ...snapshot.pendingPhoto, beats } };
+}
+function suppressPeopleBeat(snapshot) {
+  if (!snapshot.pendingPhoto) return snapshot;
+  const beats = { ...photoBeats(snapshot), people: true };
+  return {
+    ...snapshot,
+    pendingPhoto: { ...snapshot.pendingPhoto, beats, peopleSuppressed: true }
+  };
+}
+function photoBeatsComplete(snapshot) {
+  if (!snapshot.pendingPhoto) return true;
+  const b = photoBeats(snapshot);
+  return b.memories && b.timePlace && b.people;
+}
+function photoFocusTurns(snapshot) {
+  if (!snapshot.pendingPhoto) return 0;
+  return snapshot.turn - (snapshot.pendingPhoto.focusedAtTurn ?? snapshot.turn);
+}
+function setNameClarification(snapshot, clarification) {
+  return { ...snapshot, pendingNameClarification: clarification };
+}
+function clearNameClarification(snapshot) {
+  if (!snapshot.pendingNameClarification) return snapshot;
+  return { ...snapshot, pendingNameClarification: null };
 }
 var PHOTO_SOFT_CAP = 5;
 var IDLE_RETURN_MS = 4 * 60 * 60 * 1e3;
@@ -665,6 +781,66 @@ function detectConfirmation(utterance) {
   return "unclear";
 }
 
+// packages/shared/src/personMatch.ts
+function norm(s) {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+function altNames(p) {
+  if (!Array.isArray(p.alt_names)) return [];
+  return p.alt_names.filter((n) => typeof n === "string");
+}
+function classifyPersonMatch(spokenName, persons) {
+  const name = norm(spokenName);
+  if (!name) return { confidence: "unmatched", personId: null, candidates: [] };
+  const exact = persons.filter((p) => {
+    if (norm(p.full_name) === name) return true;
+    if (p.given_name && p.surname && norm(`${p.given_name} ${p.surname}`) === name) return true;
+    return false;
+  });
+  if (exact.length === 1) return { confidence: "exact", personId: exact[0].id, candidates: [] };
+  if (exact.length > 1) return { confidence: "ambiguous", personId: null, candidates: exact };
+  const first = name.split(" ")[0];
+  const fuzzy = persons.filter((p) => {
+    const given = p.given_name ? norm(p.given_name) : "";
+    const givenTokens = given.split(" ").filter(Boolean);
+    if (given === name || givenTokens[0] === name || givenTokens.includes(first)) return true;
+    if (first.length >= 3 && givenTokens.some((t) => t.startsWith(first))) return true;
+    return altNames(p).some((a) => {
+      const an = norm(a);
+      return an === name || an.split(" ")[0] === first;
+    });
+  });
+  if (fuzzy.length === 1) return { confidence: "fuzzy", personId: fuzzy[0].id, candidates: [] };
+  if (fuzzy.length > 1) return { confidence: "ambiguous", personId: null, candidates: fuzzy };
+  return { confidence: "unmatched", personId: null, candidates: [] };
+}
+function personSummary(p) {
+  return p.birth_year ? `${p.full_name}, born ${p.birth_year}` : p.full_name;
+}
+function resolveClarification(reply, candidates) {
+  const text = norm(reply);
+  if (!text) return null;
+  const years = [...text.matchAll(/\b(1[89]\d{2}|20\d{2})\b/g)].map((m) => Number(m[1]));
+  for (const y of years) {
+    const hits = candidates.filter((c) => c.birth_year === y);
+    if (hits.length === 1) return hits[0];
+  }
+  const tokens = text.split(/[^a-z']+/).filter((t) => t.length >= 3);
+  for (const t of tokens) {
+    const hits = candidates.filter(
+      (c) => norm(c.full_name).split(" ").includes(t) || altNames(c).some((a) => norm(a).split(" ").includes(t))
+    );
+    if (hits.length === 1) return hits[0];
+  }
+  const dated = candidates.filter((c) => c.birth_year != null);
+  if (dated.length === candidates.length && candidates.length > 1) {
+    const sorted = [...dated].sort((a, b) => a.birth_year - b.birth_year);
+    if (/\b(older|oldest|elder|first)\b/.test(text)) return sorted[0];
+    if (/\b(younger|youngest|later|second)\b/.test(text)) return sorted[sorted.length - 1];
+  }
+  return null;
+}
+
 // server/src/env.ts
 import "dotenv/config";
 function bool(v) {
@@ -720,7 +896,15 @@ var RECORD_PAYLOAD_TOOL = {
     properties: {
       kind: {
         type: "string",
-        enum: ["moment_draft", "story_draft", "closed_topic_event", "chapter_complete", "intro_complete"]
+        enum: [
+          "moment_draft",
+          "story_draft",
+          "closed_topic_event",
+          "chapter_complete",
+          "intro_complete",
+          "photo_details",
+          "photo_ask_outcome"
+        ]
       },
       title: { type: "string", description: "Short title (moment_draft / story_draft)." },
       summary: { type: "string", description: "Grounded summary (moment_draft)." },
@@ -744,6 +928,28 @@ var RECORD_PAYLOAD_TOOL = {
       name: {
         type: "string",
         description: "intro_complete: the subscriber's name as they gave it."
+      },
+      placeText: {
+        type: "string",
+        description: "photo_details: where the photo was, exactly as the person placed it."
+      },
+      personNames: {
+        type: "array",
+        items: { type: "string" },
+        description: "photo_details: names the person gave for people IN the photo \u2014 their words only."
+      },
+      noPeople: {
+        type: "boolean",
+        description: "photo_details: the person indicated no one to name in this photo."
+      },
+      threadComplete: {
+        type: "boolean",
+        description: "photo_details: all three photo beats (memory, time & place, who's in it) have been touched \u2014 offered counts \u2014 and this photo's thread feels complete."
+      },
+      outcome: {
+        type: "string",
+        enum: ["declined"],
+        description: "photo_ask_outcome: the person declined this chapter's photo invitation."
       }
     },
     required: ["kind"]
@@ -890,6 +1096,21 @@ function coercePayload(input, chapterId) {
   if (kind === "intro_complete" && typeof o.name === "string" && o.name.trim() !== "") {
     return { kind, name: o.name.trim() };
   }
+  if (kind === "photo_details") {
+    const names = Array.isArray(o.personNames) ? o.personNames.filter((n) => typeof n === "string").map((n) => n.trim()).filter(Boolean) : void 0;
+    return {
+      kind,
+      whenText: typeof o.whenText === "string" && o.whenText.trim() ? o.whenText.trim() : void 0,
+      placeText: typeof o.placeText === "string" && o.placeText.trim() ? o.placeText.trim() : void 0,
+      personNames: names && names.length > 0 ? names : void 0,
+      noPeople: o.noPeople === true ? true : void 0,
+      threadComplete: o.threadComplete === true ? true : void 0,
+      chapterId
+    };
+  }
+  if (kind === "photo_ask_outcome" && o.outcome === "declined") {
+    return { kind, outcome: "declined", chapterId };
+  }
   return null;
 }
 
@@ -912,6 +1133,10 @@ async function createSession() {
   const snapshot = initialStateSnapshot();
   const prior = await db().from("rot_moments").select("moment_id", { count: "exact", head: true }).eq("subscriber_id", OWNER_SUBSCRIBER_ID).eq("source", "first_thread_voice").eq("status", "committed");
   if ((prior.count ?? 0) > 0) snapshot.nextSessionRecapPending = true;
+  const last = await db().from("rot_capture_sessions").select("state_snapshot").eq("subscriber_id", OWNER_SUBSCRIBER_ID).eq("entry_point", "first_thread").order("started_at", { ascending: false }).limit(1).maybeSingle();
+  if (last.data?.state_snapshot) {
+    snapshot.photoDeclinedChapters = reviveSnapshot(last.data.state_snapshot).photoDeclinedChapters;
+  }
   const { data, error } = await db().from("rot_capture_sessions").insert({
     subscriber_id: OWNER_SUBSCRIBER_ID,
     entry_point: "first_thread",
@@ -1012,6 +1237,38 @@ async function insertMediaAsset(args) {
   if (error) throw new Error(`media_assets insert failed: ${error.message}`);
   return { assetId: data.asset_id };
 }
+async function listSessionPhotos(sessionId) {
+  const { data: sessionRow, error: sErr } = await db().from("rot_capture_sessions").select("started_at, subscriber_id, state_snapshot").eq("session_id", sessionId).single();
+  if (sErr || !sessionRow) return [];
+  const snapshot = reviveSnapshot(sessionRow.state_snapshot);
+  const { data: assets } = await db().from("media_assets").select("asset_id, storage_url, caption, created_at, rot_moments!inner(subscriber_id)").eq("asset_type", "photo").eq("rot_moments.subscriber_id", sessionRow.subscriber_id).gte("created_at", sessionRow.started_at).order("created_at", { ascending: true });
+  const storage = db().storage;
+  const sign = async (storageUrl) => {
+    const slash = storageUrl.indexOf("/");
+    if (slash <= 0) return null;
+    const bucket = storageUrl.slice(0, slash);
+    const path = storageUrl.slice(slash + 1);
+    const { data } = await storage.from(bucket).createSignedUrl(path, 3600);
+    return data?.signedUrl ?? null;
+  };
+  const out = [];
+  for (const a of assets ?? []) {
+    const url = await sign(a.storage_url);
+    if (url) {
+      out.push({
+        assetId: a.asset_id,
+        url,
+        caption: a.caption ?? null,
+        createdAt: a.created_at
+      });
+    }
+  }
+  for (const held of snapshot.heldPhotos) {
+    const url = await sign(held.storageUrl);
+    if (url) out.push({ assetId: null, url, caption: null, createdAt: sessionRow.started_at });
+  }
+  return out;
+}
 
 // server/src/riverWrites.ts
 import { createHash } from "node:crypto";
@@ -1081,6 +1338,7 @@ async function writeAmbientStory(args) {
     chapter: args.draft.chapterId,
     layer: 3,
     cluster_root_id: args.anchorMomentId,
+    cluster_tags: Array.isArray(args.clusterTags) ? args.clusterTags : [],
     created_by: "seth",
     sync_idempotency_key: key
   }).select("moment_id").single();
@@ -1123,8 +1381,8 @@ async function getPriorSessionMoments(args) {
     chapter: r.chapter
   }));
 }
-function buildNextSessionRecapPrompt(moments) {
-  if (moments.length === 0) return "";
+function buildNextSessionRecapPrompt(moments, unmatchedNames = []) {
+  if (moments.length === 0 && unmatchedNames.length === 0) return "";
   const titles = moments.map((m) => m.title);
   let listStr;
   if (titles.length === 1) {
@@ -1136,10 +1394,12 @@ function buildNextSessionRecapPrompt(moments) {
     const rest = titles.slice(0, -1).join(", ");
     listStr = `${rest}, and ${last}`;
   }
-  return `Last time you told me about ${listStr}. I've held onto those. Shall we carry on?`;
+  const namesAsk = buildUnmatchedNamesAsk(unmatchedNames);
+  if (titles.length === 0) return `Welcome back. ${namesAsk}`.trim();
+  return `Last time you told me about ${listStr}. I've held onto those.${namesAsk ? ` ${namesAsk}` : " Shall we carry on?"}`;
 }
-function buildMidSessionRecapPrompt(rows) {
-  if (rows.length === 0) return "";
+function buildMidSessionRecapPrompt(rows, unmatchedNames = []) {
+  if (rows.length === 0 && unmatchedNames.length === 0) return "";
   const titles = rows.map((r) => r.title);
   let listStr;
   if (titles.length === 1) {
@@ -1151,8 +1411,22 @@ function buildMidSessionRecapPrompt(rows) {
     const rest = titles.slice(0, -1).join(", ");
     listStr = `${rest}, and ${last}`;
   }
+  const namesAsk = buildUnmatchedNamesAsk(unmatchedNames);
+  if (titles.length === 0) return `Before we move on \u2014 ${lowerFirst(namesAsk)}`;
   const bothOrAll = titles.length === 1 ? "that" : titles.length === 2 ? "both of those" : "all of those";
-  return `Before we move on \u2014 you mentioned ${listStr}. I've held onto ${bothOrAll}. Does that feel right?`;
+  return `Before we move on \u2014 you mentioned ${listStr}. I've held onto ${bothOrAll}. Does that feel right?${namesAsk ? ` ${namesAsk}` : ""}`;
+}
+function buildUnmatchedNamesAsk(names) {
+  if (names.length === 0) return "";
+  if (names.length === 1) {
+    return `You mentioned ${names[0]} in a photograph \u2014 I don't have ${names[0]} in the family record. Should I add ${names[0]}?`;
+  }
+  const last = names[names.length - 1];
+  const rest = names.slice(0, -1).join(", ");
+  return `You mentioned ${rest} and ${last} in the photographs \u2014 I don't have them in the family record. Should I add them?`;
+}
+function lowerFirst(s) {
+  return s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 }
 async function recordClosedTopicEvent(args) {
   const topicTokens = topicFromUtterance(args.utterance, args.payload.phrase);
@@ -1167,6 +1441,97 @@ async function recordClosedTopicEvent(args) {
     match_tokens: tokens
   });
   if (error) throw new Error(`recordClosedTopicEvent failed: ${error.message}`);
+}
+
+// server/src/photoWalk.ts
+import { randomUUID } from "node:crypto";
+async function fetchPersonRecords() {
+  const { data, error } = await getDb().from("persons").select("id, full_name, given_name, surname, birth_year, alt_names");
+  if (error) throw new Error(`fetchPersonRecords failed: ${error.message}`);
+  return data ?? [];
+}
+async function insertPhotoPerson(args) {
+  const db2 = getDb();
+  const existing = await db2.from("photo_persons").select("photo_person_id, person_id, display_name, match_confidence, status").eq("subscriber_id", args.subscriberId).eq("asset_id", args.assetId).ilike("display_name", args.displayName).maybeSingle();
+  if (existing.data?.photo_person_id) {
+    return {
+      photoPersonId: existing.data.photo_person_id,
+      personId: existing.data.person_id ?? null,
+      displayName: existing.data.display_name,
+      matchConfidence: existing.data.match_confidence,
+      status: existing.data.status
+    };
+  }
+  const { data, error } = await db2.from("photo_persons").insert({
+    subscriber_id: args.subscriberId,
+    asset_id: args.assetId,
+    person_id: args.personId,
+    display_name: args.displayName,
+    match_confidence: args.matchConfidence,
+    status: args.status ?? "pending_review"
+  }).select("photo_person_id").single();
+  if (error) throw new Error(`insertPhotoPerson failed: ${error.message}`);
+  return {
+    photoPersonId: data.photo_person_id,
+    personId: args.personId,
+    displayName: args.displayName,
+    matchConfidence: args.matchConfidence,
+    status: args.status ?? "pending_review"
+  };
+}
+async function resolvePhotoPerson(photoPersonId, personId) {
+  const { error } = await getDb().from("photo_persons").update({ person_id: personId, match_confidence: "exact" }).eq("photo_person_id", photoPersonId);
+  if (error) throw new Error(`resolvePhotoPerson failed: ${error.message}`);
+}
+async function getUnmatchedPhotoPersons(subscriberId) {
+  const { data, error } = await getDb().from("photo_persons").select("photo_person_id, display_name").eq("subscriber_id", subscriberId).eq("match_confidence", "unmatched").eq("status", "pending_review").order("created_at", { ascending: true });
+  if (error) throw new Error(`getUnmatchedPhotoPersons failed: ${error.message}`);
+  return (data ?? []).map((r) => ({
+    photoPersonId: r.photo_person_id,
+    displayName: r.display_name
+  }));
+}
+async function promoteUnmatchedPhotoPerson(args) {
+  const db2 = getDb();
+  const stubPersonId = `stub_${randomUUID()}`;
+  const { error: personErr } = await db2.from("persons").insert({
+    id: stubPersonId,
+    full_name: args.displayName,
+    given_name: args.displayName,
+    alt_names: []
+  });
+  if (personErr) throw new Error(`stub persons insert failed: ${personErr.message}`);
+  const { error } = await db2.from("photo_persons").update({ person_id: stubPersonId, status: "committed" }).eq("photo_person_id", args.photoPersonId);
+  if (error) throw new Error(`promoteUnmatchedPhotoPerson failed: ${error.message}`);
+  return { stubPersonId };
+}
+async function discardUnmatchedPhotoPerson(photoPersonId) {
+  const { error } = await getDb().from("photo_persons").update({ status: "removed" }).eq("photo_person_id", photoPersonId).eq("status", "pending_review");
+  if (error) throw new Error(`discardUnmatchedPhotoPerson failed: ${error.message}`);
+}
+async function commitPendingPhotoPersons(subscriberId) {
+  const { error } = await getDb().from("photo_persons").update({ status: "committed" }).eq("subscriber_id", subscriberId).eq("status", "pending_review").neq("match_confidence", "unmatched");
+  if (error) throw new Error(`commitPendingPhotoPersons failed: ${error.message}`);
+}
+async function updateMomentPlace(momentId, placeText) {
+  const { error } = await getDb().from("rot_moments").update({ place_text: placeText }).eq("moment_id", momentId);
+  if (error) throw new Error(`updateMomentPlace failed: ${error.message}`);
+}
+async function findOrphanedPhotoStories(subscriberId) {
+  const db2 = getDb();
+  const { data, error } = await db2.from("rot_moments").select("moment_id, title, cluster_root_id").eq("subscriber_id", subscriberId).eq("source", "first_thread_voice").eq("status", "pending_review").eq("layer", 3).contains("cluster_tags", ["photo_walk"]).not("cluster_root_id", "is", null);
+  if (error) throw new Error(`findOrphanedPhotoStories failed: ${error.message}`);
+  const stories = (data ?? []).map((r) => ({
+    momentId: r.moment_id,
+    title: r.title,
+    anchorId: r.cluster_root_id
+  }));
+  if (stories.length === 0) return [];
+  const anchorIds = [...new Set(stories.map((s) => s.anchorId))];
+  const { data: assets, error: assetErr } = await db2.from("media_assets").select("moment_id").in("moment_id", anchorIds);
+  if (assetErr) throw new Error(`findOrphanedPhotoStories assets failed: ${assetErr.message}`);
+  const withAssets = new Set((assets ?? []).map((a) => a.moment_id));
+  return stories.filter((s) => !withAssets.has(s.anchorId));
 }
 
 // server/src/clm.ts
@@ -1194,6 +1559,17 @@ function latestSubscriberUtterance(messages) {
 function recapTimeElapsed(recapLastAt) {
   if (!recapLastAt) return false;
   return Date.now() - new Date(recapLastAt).getTime() > RECAP_INTERVAL_MS;
+}
+var PHOTO_FOCUS_TURN_CAP = 14;
+function nameHitsClosedScope(snapshot, name, persons) {
+  if (touchesClosedScope(snapshot, name)) return true;
+  const match = classifyPersonMatch(name, persons);
+  const candidates = match.personId ? persons.filter((p) => p.id === match.personId) : match.candidates;
+  return candidates.some((p) => {
+    if (touchesClosedScope(snapshot, p.full_name)) return true;
+    const alts = Array.isArray(p.alt_names) ? p.alt_names : [];
+    return alts.some((a) => typeof a === "string" && touchesClosedScope(snapshot, a));
+  });
 }
 async function handleClmRequest(req, res) {
   const body = req.body;
@@ -1309,14 +1685,21 @@ async function handleClmRequest(req, res) {
       const priorMoments = await safe(
         () => getPriorSessionMoments({ subscriberId, currentSessionId: sessionId })
       ) ?? [];
-      if (priorMoments.length > 0) {
-        const recapText = buildNextSessionRecapPrompt(priorMoments);
+      const priorUnmatched = await safe(() => getUnmatchedPhotoPersons(subscriberId)) ?? [];
+      if (priorMoments.length > 0 || priorUnmatched.length > 0) {
+        const recapText = buildNextSessionRecapPrompt(
+          priorMoments,
+          priorUnmatched.map((u) => u.displayName)
+        );
         sseChunk(res, recapText);
+        if (priorUnmatched.length > 0) {
+          snapshot = { ...snapshot, recapPending: true, nextSessionRecapPending: false };
+        }
         await safe(
           () => appendExchange({
             sessionId,
             role: "system",
-            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments`
+            content: `[recap/next-session] surfaced ${priorMoments.length} prior committed moments + ${priorUnmatched.length} unmatched photo names`
           })
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -1330,6 +1713,7 @@ async function handleClmRequest(req, res) {
     const pendingRows = await safe(
       () => getPendingReviewRows({ subscriberId, sessionId })
     ) ?? [];
+    const unmatched = await safe(() => getUnmatchedPhotoPersons(subscriberId)) ?? [];
     const verdict = detectConfirmation(utterance);
     if (verdict === "confirm" || utterance.trim() === "") {
       if (pendingRows.length > 0) {
@@ -1346,16 +1730,32 @@ async function handleClmRequest(req, res) {
           })
         );
       }
+      for (const u of unmatched) {
+        const promoted = await safe(() => promoteUnmatchedPhotoPerson(u));
+        if (promoted) {
+          await safe(
+            () => appendExchange({
+              sessionId,
+              role: "system",
+              content: `[recap/persons] promoted "${u.displayName}" \u2192 ${promoted.stubPersonId}`
+            })
+          );
+        }
+      }
+      await safe(() => commitPendingPhotoPersons(subscriberId));
       snapshot = { ...snapshot, recapPending: false };
     } else if (verdict === "decline") {
       for (const row of pendingRows) {
         await safe(() => dropPendingReview(row.momentId));
       }
+      for (const u of unmatched) {
+        await safe(() => discardUnmatchedPhotoPerson(u.photoPersonId));
+      }
       await safe(
         () => appendExchange({
           sessionId,
           role: "system",
-          content: `[recap] subscriber declined batch \u2014 dropped ${pendingRows.length} pending_review rows`
+          content: `[recap] subscriber declined batch \u2014 dropped ${pendingRows.length} pending_review rows, discarded ${unmatched.length} unmatched photo names`
         })
       );
       snapshot = { ...snapshot, recapPending: false };
@@ -1369,9 +1769,13 @@ async function handleClmRequest(req, res) {
       const pendingRows = await safe(
         () => getPendingReviewRows({ subscriberId, sessionId })
       ) ?? [];
+      const unmatched = await safe(() => getUnmatchedPhotoPersons(subscriberId)) ?? [];
       const reason = chapterBoundary ? "chapter boundary" : softCap ? "photo soft cap" : "20-min elapsed";
-      if (pendingRows.length > 0) {
-        const recapText = buildMidSessionRecapPrompt(pendingRows);
+      if (pendingRows.length > 0 || unmatched.length > 0) {
+        const recapText = buildMidSessionRecapPrompt(
+          pendingRows,
+          unmatched.map((u) => u.displayName)
+        );
         sseChunk(res, recapText);
         snapshot = { ...snapshot, recapPending: true };
         snapshot = resetPhotosSinceRecap(snapshot);
@@ -1380,7 +1784,7 @@ async function handleClmRequest(req, res) {
           () => appendExchange({
             sessionId,
             role: "system",
-            content: `[recap] ${reason} \u2014 surfaced ${pendingRows.length} pending_review rows for confirmation`
+            content: `[recap] ${reason} \u2014 surfaced ${pendingRows.length} pending_review rows + ${unmatched.length} unmatched photo names for confirmation`
           })
         );
         await safe(() => updateSession(sessionId, { snapshot }));
@@ -1391,7 +1795,73 @@ async function handleClmRequest(req, res) {
       if (softCap) snapshot = resetPhotosSinceRecap(snapshot);
     }
   }
-  snapshot = recordNamedIdentities(snapshot, extractNamedIdentities(utterance), snapshot.turn);
+  const parsedNames = extractNamedIdentities(utterance);
+  snapshot = recordNamedIdentities(snapshot, parsedNames, snapshot.turn);
+  let personsCache = null;
+  const getPersons = async () => {
+    if (personsCache) return personsCache;
+    personsCache = await safe(() => fetchPersonRecords()) ?? [];
+    return personsCache;
+  };
+  if (snapshot.pendingPhoto && !snapshot.pendingPhoto.peopleSuppressed && parsedNames.length > 0) {
+    const persons = await getPersons();
+    for (const name of parsedNames) {
+      if (nameHitsClosedScope(snapshot, name, persons)) {
+        const assetId = snapshot.pendingPhoto.assetId;
+        snapshot = suppressPeopleBeat(snapshot);
+        snapshot = clearNameClarification(snapshot);
+        if (subscriberId) {
+          await safe(
+            () => insertPhotoPerson({
+              subscriberId,
+              assetId,
+              personId: null,
+              displayName: name,
+              matchConfidence: "unmatched",
+              status: "removed"
+            })
+          );
+        }
+        if (sessionId) {
+          await safe(
+            () => appendExchange({
+              sessionId,
+              role: "system",
+              content: `[reverence/photo] who's-in-it beat suppressed for asset ${assetId} (closed-scope match)`
+            })
+          );
+        }
+        break;
+      }
+    }
+  }
+  if (snapshot.pendingNameClarification && snapshot.pendingNameClarification.askedTurn > 0 && snapshot.turn > snapshot.pendingNameClarification.askedTurn) {
+    const clarification = snapshot.pendingNameClarification;
+    const persons = await getPersons();
+    const candidates = persons.filter((p) => clarification.candidateIds.includes(p.id));
+    const resolved = resolveClarification(utterance, candidates);
+    if (resolved && snapshot.pendingPhoto && nameHitsClosedScope(snapshot, resolved.full_name, persons)) {
+      snapshot = suppressPeopleBeat(snapshot);
+    } else if (resolved && clarification.photoPersonId) {
+      await safe(() => resolvePhotoPerson(clarification.photoPersonId, resolved.id));
+      if (sessionId) {
+        await safe(
+          () => appendExchange({
+            sessionId,
+            role: "system",
+            content: `[photo/persons] "${clarification.displayName}" resolved \u2192 ${resolved.id}`
+          })
+        );
+      }
+    }
+    snapshot = clearNameClarification(snapshot);
+  }
+  const photosInFlight = Boolean(snapshot.pendingPhoto) || snapshot.heldPhotos.length > 0;
+  const photoAskDue = snapshot.photoAskPending && !photosInFlight;
+  if (snapshot.photoAskPending && photosInFlight) {
+    snapshot = { ...markPhotoAsked(snapshot), photoAskAwaitingReply: false };
+  }
+  const photoAskAwaiting = !photoAskDue && snapshot.photoAskAwaitingReply;
   const systemPrompt = buildSethSystemPrompt({
     chapterId: snapshot.chapterId,
     subscriberName: snapshot.subscriberName,
@@ -1405,8 +1875,20 @@ async function handleClmRequest(req, res) {
     operationalReturn,
     namedIdentities: snapshot.namedIdentities,
     confirmedInChapter: confirmedInChapter(snapshot),
-    recapPending: snapshot.recapPending
+    recapPending: snapshot.recapPending,
+    photoAskPending: photoAskDue,
+    photoAskAwaitingReply: photoAskAwaiting,
+    // The clarify instruction rides exactly one prompt: the turn it's armed.
+    nameClarification: snapshot.pendingNameClarification && snapshot.pendingNameClarification.askedTurn === 0 ? snapshot.pendingNameClarification : null
   });
+  if (photoAskDue) snapshot = markPhotoAsked(snapshot);
+  else if (photoAskAwaiting) snapshot = clearPhotoAskAwaiting(snapshot);
+  if (snapshot.pendingNameClarification && snapshot.pendingNameClarification.askedTurn === 0) {
+    snapshot = setNameClarification(snapshot, {
+      ...snapshot.pendingNameClarification,
+      askedTurn: snapshot.turn
+    });
+  }
   try {
     const result = await generateSethTurn({
       systemPrompt,
@@ -1489,6 +1971,7 @@ async function handleClmRequest(req, res) {
         }
         case "story_draft": {
           if (subscriberId && sessionId) {
+            const wasPhotoStory = Boolean(snapshot.pendingPhoto);
             const anchorId = snapshot.pendingPhoto?.momentId ?? snapshot.activeMomentId ?? null;
             const written = await safe(
               () => writeAmbientStory({
@@ -1496,11 +1979,12 @@ async function handleClmRequest(req, res) {
                 sessionId,
                 draft: result.payload,
                 turn: snapshot.turn,
-                anchorMomentId: anchorId
+                anchorMomentId: anchorId,
+                clusterTags: wasPhotoStory ? ["photo_walk"] : []
               })
             );
-            if (written && snapshot.pendingPhoto) {
-              snapshot = dequeuePhoto(snapshot);
+            if (written && wasPhotoStory) {
+              snapshot = markPhotoBeat(snapshot, "memories");
             }
             if (written) {
               await safe(
@@ -1515,6 +1999,116 @@ async function handleClmRequest(req, res) {
           snapshot = stageDraft(snapshot, result.payload);
           break;
         }
+        case "photo_ask_outcome": {
+          snapshot = declinePhotoAsk(snapshot);
+          if (sessionId) {
+            await safe(
+              () => appendExchange({
+                sessionId,
+                role: "system",
+                content: `[photo/ask] declined for chapter ${snapshot.chapterId} \u2014 suppressed for this chapter (not a closed topic)`
+              })
+            );
+          }
+          break;
+        }
+        case "photo_details": {
+          const details = result.payload;
+          const photo = snapshot.pendingPhoto;
+          if (!photo) break;
+          if (details.whenText || details.placeText) {
+            snapshot = markPhotoBeat(snapshot, "timePlace");
+            if (details.placeText) {
+              await safe(() => updateMomentPlace(photo.momentId, details.placeText));
+            }
+          }
+          if (details.noPeople) {
+            snapshot = markPhotoBeat(snapshot, "people");
+          }
+          if (details.personNames && !snapshot.pendingPhoto?.peopleSuppressed) {
+            const persons = await getPersons();
+            for (const spoken of details.personNames) {
+              if (nameHitsClosedScope(snapshot, spoken, persons)) {
+                snapshot = suppressPeopleBeat(snapshot);
+                snapshot = clearNameClarification(snapshot);
+                if (subscriberId) {
+                  await safe(
+                    () => insertPhotoPerson({
+                      subscriberId,
+                      assetId: photo.assetId,
+                      personId: null,
+                      displayName: spoken,
+                      matchConfidence: "unmatched",
+                      status: "removed"
+                    })
+                  );
+                }
+                if (sessionId) {
+                  await safe(
+                    () => appendExchange({
+                      sessionId,
+                      role: "system",
+                      content: `[reverence/photo] who's-in-it beat suppressed for asset ${photo.assetId} (closed-scope match)`
+                    })
+                  );
+                }
+                break;
+              }
+              const match = classifyPersonMatch(spoken, persons);
+              if (subscriberId) {
+                const row = await safe(
+                  () => insertPhotoPerson({
+                    subscriberId,
+                    assetId: photo.assetId,
+                    personId: match.personId,
+                    displayName: spoken,
+                    matchConfidence: match.confidence
+                  })
+                );
+                if (row && match.confidence === "ambiguous" && !snapshot.pendingNameClarification) {
+                  snapshot = setNameClarification(snapshot, {
+                    displayName: spoken,
+                    photoPersonId: row.photoPersonId,
+                    candidateIds: match.candidates.map((c) => c.id),
+                    candidateSummaries: match.candidates.slice(0, 3).map(personSummary),
+                    askedTurn: 0
+                  });
+                }
+                if (sessionId) {
+                  await safe(
+                    () => appendExchange({
+                      sessionId,
+                      role: "system",
+                      content: `[photo/persons] "${spoken}" \u2192 ${match.confidence}${match.personId ? ` (${match.personId})` : ""} on asset ${photo.assetId}`
+                    })
+                  );
+                }
+              }
+              snapshot = markPhotoBeat(snapshot, "people");
+            }
+          }
+          if (details.threadComplete) {
+            snapshot = markPhotoBeat(snapshot, "memories");
+            snapshot = markPhotoBeat(snapshot, "timePlace");
+            snapshot = markPhotoBeat(snapshot, "people");
+          }
+          break;
+        }
+      }
+    }
+    if (snapshot.pendingPhoto) {
+      const stuck = photoFocusTurns(snapshot) > PHOTO_FOCUS_TURN_CAP;
+      if (photoBeatsComplete(snapshot) || stuck) {
+        if (stuck && sessionId) {
+          await safe(
+            () => appendExchange({
+              sessionId,
+              role: "system",
+              content: `[photo] focus released by turn cap for asset ${snapshot.pendingPhoto.assetId} (beats incomplete)`
+            })
+          );
+        }
+        snapshot = dequeuePhoto(snapshot);
       }
     }
     if (!snapshot.followUpSpent) snapshot = spendFollowUp(snapshot);
@@ -1582,7 +2176,7 @@ async function handlePhotoUpload(req, res) {
         retainOriginal: retainOriginal === true
       });
       const review = await describePhotograph({ strippedJpegBase64: strippedBase64 });
-      const snapshot = holdPhoto(session.snapshot, {
+      const snapshot = holdPhoto(clearPhotoAskAwaiting(session.snapshot), {
         storageUrl,
         retainOriginal: retainOriginal === true,
         whenText: typeof whenText === "string" && whenText ? whenText : void 0,
@@ -1614,6 +2208,7 @@ async function handlePhotoUpload(req, res) {
     });
     const review = await describePhotograph({ strippedJpegBase64: strippedBase64 });
     let snapshot = clearDraft(session.snapshot);
+    snapshot = clearPhotoAskAwaiting(snapshot);
     snapshot = enqueuePhoto(snapshot, {
       assetId,
       momentId: session.snapshot.activeMomentId,
@@ -1676,6 +2271,26 @@ app.patch("/api/sessions/:id", requireFlag, async (req, res) => {
   }
   try {
     await updateSession(id, { status });
+    if (status === "complete") {
+      try {
+        const session = await getSession(id);
+        if (session) {
+          const orphans = await findOrphanedPhotoStories(session.subscriberId);
+          for (const o of orphans) {
+            await appendExchange({
+              sessionId: id,
+              role: "system",
+              content: `[cleanup] photo story "${o.title}" (${o.momentId}) has no surviving asset on its anchor \u2014 flagged for review at next recap`
+            });
+          }
+          if (orphans.length > 0) {
+            console.log("[sessions:close] flagged orphaned photo stories", orphans.length);
+          }
+        }
+      } catch (err) {
+        console.error("[sessions:close] orphan check failed (non-fatal):", err);
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error("[sessions:update]", err);
@@ -1744,6 +2359,14 @@ app.post("/api/sessions/:id/chapter", requireFlag, async (req, res) => {
   }
 });
 app.post("/api/photos", requireFlag, handlePhotoUpload);
+app.get("/api/sessions/:id/photos", requireFlag, async (req, res) => {
+  try {
+    res.json({ photos: await listSessionPhotos(req.params.id) });
+  } catch (err) {
+    console.error("[sessions:photos]", err);
+    res.status(500).json({ error: "failed to list session photos" });
+  }
+});
 app.post("/api/clm/chat/completions", requireFlag, handleClmRequest);
 function start() {
   if (process.env.VERCEL) return;
